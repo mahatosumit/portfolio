@@ -90,7 +90,7 @@ export function Footer() {
           <div className="flex items-center text-muted-foreground text-sm mt-4 md:mt-0">
             <span>Made with</span>
             <Heart size={16} className="mx-2 text-red-500" />
-            <span>with Technology</span>
+            <span>in Technology</span>
           </div>
         </div>
       </div>
