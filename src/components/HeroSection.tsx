@@ -56,18 +56,17 @@ export function HeroSection() {
         </div>
 
         {/* Right Content - Profile Image */}
-        <div className="flex justify-center lg:justify-end">
-          <div className="hexagon glow-effect hover:scale-105 transition-transform duration-300">
-            <div className="hexagon-inner">
-              <img
-                src={heroImage}
-                alt="Sumit Kumar Mahato"
-                className="hexagon-img"
-              />
-            </div>
-          </div>
-        </div>
-      </div>
+       <div className="flex justify-center lg:justify-end">
+  <div style={{ maxWidth: '400px', maxHeight: '400px' }}>
+    <div className="hexagon-inner">
+      <img
+        src={heroImage}
+        alt="Sumit Kumar Mahato"
+{/*         className="hexagon-img" // Uncomment if styling is needed */}
+      />
+    </div>
+  </div>
+</div>
 
       {/* Scroll Indicator */}
       <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2">
