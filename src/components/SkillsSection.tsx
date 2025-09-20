@@ -66,7 +66,7 @@ export function SkillsSection() {
           </h2>
           <div className="w-24 h-1 bg-primary mx-auto mb-8"></div>
           <p className="text-xl text-muted-foreground max-w-3xl mx-auto">
-            A comprehensive toolkit spanning AI, robotics, and full-stack development
+            A comprehensive toolkit spanning AI, Robotics, and Web Development
           </p>
         </motion.div>
 
