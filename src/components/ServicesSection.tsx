@@ -27,7 +27,7 @@ export function ServicesSection() {
       color: 'from-blue-500 to-cyan-500'
     },
     {
-      title: 'Full-Stack Web Development',
+      title: 'Web Development',
       description: 'Modern web applications with responsive design, seamless user experience, and scalable backend architecture.',
       icon: Code,
       features: ['React/Next.js', 'API Development', 'Database Design', 'Cloud Deployment'],
