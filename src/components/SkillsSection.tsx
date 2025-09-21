@@ -34,7 +34,7 @@ export function SkillsSection() {
     {
       title: 'Data & Tools',
       icon: Database,
-      skills: ['NumPy', 'Pandas', 'MATLAB', 'OpenCV', 'Grafana'],
+      skills: ['NumPy', 'Pandas','OpenCV', 'Grafana'],
       color: 'from-orange-500 to-red-500'
     },
     {
