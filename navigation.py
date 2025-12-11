@@ -14,6 +14,7 @@ def send(cmd):
     ser.write((cmd + "\n").encode())
     print("[CMD]", cmd)
 
+
 # =====================================================
 # ULTRASONIC SENSORS
 # =====================================================
@@ -23,18 +24,37 @@ back        = DistanceSensor(echo=25, trigger=24, max_distance=4)
 
 OBSTACLE = 25  # cm threshold
 
+
 # =====================================================
 # LOAD MobileNet SSD MODEL (VISION LOGIC)
 # =====================================================
-net = cv2.dnn.readNetFromCaffe("deploy.prototxt",
-                               "MobileNetSSD_deploy.caffemodel")
+net = cv2.dnn.readNetFromCaffe(
+    "deploy.prototxt",
+    "MobileNetSSD_deploy.caffemodel"
+)
 
 CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
            "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
            "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
            "sofa", "train", "tvmonitor"]
 
-cap = cv2.VideoCapture(0)
+
+# =====================================================
+# FIXED CAMERA INITIALIZATION FOR PI3 + BOOKWORM
+# =====================================================
+cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+
+# MUST SET LOWER RESOLUTION (otherwise Pi3 will fail allocation)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+cap.set(cv2.CAP_PROP_FPS, 30)
+
+time.sleep(2)  # camera warmup
+
+if not cap.isOpened():
+    print("ERROR: Camera failed to open. Exiting.")
+    exit()
+
 
 # =====================================================
 # MOVEMENT TUNING
@@ -46,6 +66,7 @@ TURN_SPEED    = 140
 STRAFE_TIME = 0.60
 TURN_TIME   = 0.70
 BACKUP_TIME = 0.50
+
 
 # =====================================================
 # AUTO-RECOVERY FUNCTION
@@ -66,8 +87,9 @@ def auto_recover():
     send("<STOP>")
     time.sleep(0.2)
 
+
 # =====================================================
-# MAIN LOOP (ULTRASONIC + CAMERA IN ONE PLACE)
+# MAIN LOOP (VISION + ULTRASONIC)
 # =====================================================
 while True:
 
@@ -80,16 +102,22 @@ while True:
 
     # ----------- CAMERA FRAME -----------
     ret, frame = cap.read()
+
     if not ret:
+        print("WARN: Camera frame read failed")
+        time.sleep(0.1)
         continue
 
     # ----------- PERSON DETECTION -----------
-    blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)),
-                                 0.007843, (300, 300), 127.5)
+    blob = cv2.dnn.blobFromImage(
+        cv2.resize(frame, (300, 300)),
+        0.007843, (300, 300), 127.5
+    )
     net.setInput(blob)
     detections = net.forward()
 
     person_detected = False
+
     for i in range(detections.shape[2]):
         confidence = detections[0, 0, i, 2]
 
@@ -100,14 +128,16 @@ while True:
             if label == "person":
                 person_detected = True
 
-                # Draw box
                 box = detections[0, 0, i, 3:7] * np.array(
-                    [frame.shape[1], frame.shape[0], frame.shape[1], frame.shape[0]]
+                    [frame.shape[1], frame.shape[0],
+                     frame.shape[1], frame.shape[0]]
                 )
                 (x1, y1, x2, y2) = box.astype("int")
+
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(frame, "PERSON", (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (0, 255, 0), 2)
 
     # ----------- SAFETY: PERSON STOP -----------
     if person_detected:
@@ -116,8 +146,10 @@ while True:
         time.sleep(3)
         continue
 
+
     # ----------- ULTRASONIC OBSTACLE AVOIDANCE -----------
-    # Both front sensors blocked → robot is stuck
+
+    # Front completely blocked → stuck
     if fl < OBSTACLE and fr < OBSTACLE:
         print("FRONT BLOCKED → AUTO RECOVERY")
         auto_recover()
@@ -139,18 +171,18 @@ while True:
         send("<STOP>")
         continue
 
-    # Back blocked
+    # Back obstacle
     if bk < OBSTACLE:
         print("BACK BLOCKED → HOLD")
         send("<STOP>")
         continue
 
-    # ----------- DEFAULT: MOVE FORWARD -----------
+    # ----------- DEFAULT MOVEMENT: FORWARD -----------
     print("CLEAR PATH → MOVE FORWARD")
     send(f"<MOVE|F|{FORWARD_SPEED}>")
 
-    # ----------- OPTIONAL PREVIEW WINDOW -----------
-    cv2.imshow("TravaX Navigation Preview", frame)
+    # ----------- OPTIONAL PREVIEW -----------
+    cv2.imshow("Rover Navigation Preview", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
