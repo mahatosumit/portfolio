@@ -1,10 +1,20 @@
-#!/bin/bash
+[Unit]
+Description=Rover Autonomous Navigation System
+After=network.target
 
-# Go to rover project directory
-cd /home/pi/rover
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/rover
+ExecStart=/home/pi/rover/start_rover.sh
 
-# Activate virtual environment
-source rover_env/bin/activate
+# Restart robot automatically if script crashes
+Restart=always
+RestartSec=5
 
-# Run your navigation file and save logs
-python3 navigation.py >> /home/pi/rover/rover.log 2>&1
+# Logging
+StandardOutput=append:/home/pi/rover/rover.log
+StandardError=append:/home/pi/rover/rover_error.log
+
+[Install]
+WantedBy=multi-user.target
