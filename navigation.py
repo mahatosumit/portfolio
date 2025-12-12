@@ -1,78 +1,57 @@
-import time
-from motor import MotorController
-from sensor import UltrasonicSensors
-from vision import Vision   # <-- FIXED IMPORT
+# vision.py
+import cv2
+from picamera2 import Picamera2
 
-RUN_TIME = 120  # 2 minutes
+class Vision:
+    """
+    Haar-based full-body detection + Picamera2 capture.
+    """
 
-def main():
-    print("TravaX Rover Ready (2-minute run mode)")
+    def __init__(self, width=640, height=480):
+        # ----- Load Haar Cascade -----
+        self.cascade_path = cv2.data.haarcascades + "haarcascade_fullbody.xml"
+        self.detector = cv2.CascadeClassifier(self.cascade_path)
+        if self.detector.empty():
+            raise RuntimeError("Failed to load Haar cascade")
 
-    mc = MotorController()
-    us = UltrasonicSensors()
-    vision = Vision()   # <-- FIXED CLASS NAME
+        # ----- Initialize Camera -----
+        self.picam = Picamera2()
+        config = self.picam.create_video_configuration(
+            main={"format": "XRGB8888", "size": (width, height)}
+        )
+        self.picam.configure(config)
+        self.picam.start()
 
-    start = time.time()
+        print("[Vision] Picamera2 initialized.")
 
-    while True:
+    def capture(self):
+        """
+        Capture one frame from the Pi Camera.
+        Returns a BGR frame usable by OpenCV.
+        """
+        frame = self.picam.capture_array()
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+        return frame
 
-        # ===== AUTO STOP AFTER 2 MINUTES =====
-        if time.time() - start >= RUN_TIME:
-            print("\n=== 2 MINUTES COMPLETE — STOPPING ROVER ===")
-            mc.stop()
-            time.sleep(0.5)
-            print("Rover stopped safely.")
-            break
+    def detect(self, frame, scaleFactor=1.08, minNeighbors=4, minSize=(64, 64)):
+        """
+        Returns list of (x, y, w, h) detected humans.
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        bodies = self.detector.detectMultiScale(
+            gray,
+            scaleFactor=scaleFactor,
+            minNeighbors=minNeighbors,
+            minSize=minSize
+        )
+        return bodies
 
-        try:
-            # --- READ ULTRASONIC ---
-            dist = us.read_all()
-            FL, FC, FR, RE = dist["FL"], dist["FC"], dist["FR"], dist["RE"]
-
-            print(f"US: FL={FL} FC={FC} FR={FR} RE={RE}")
-
-            rear_blocked  = RE < 15
-            front_blocked = (FC < 25) or (FL < 20)
-
-            # --- CAMERA FRAME ---
-            frame = vision.capture() if hasattr(vision, "capture") else None
-
-            bodies = []
-            if frame is not None:
-                bodies = vision.detect(frame)
-
-            # ===== DECISION LOGIC =====
-            if rear_blocked:
-                print("Rear obstacle → forward bump")
-                mc.forward()
-                time.sleep(0.15)
-                mc.stop()
-                continue
-
-            if len(bodies) > 0:
-                print("Human detected → STOP")
-                mc.stop()
-                continue
-
-            if front_blocked:
-                print("Front obstacle → rotate left")
-                mc.stop()
-                time.sleep(0.2)
-                mc.rotate_left()
-                time.sleep(0.4)
-                mc.stop()
-                continue
-
-            print("PATH CLEAR → forward step")
-            mc.forward()
-            time.sleep(0.15)
-            mc.stop()
-
-        except Exception as e:
-            print("[WARNING — continuing loop]", e)
-            time.sleep(0.1)
-            continue
-
-
-if __name__ == "__main__":
-    main()
+    def annotate(self, frame, bodies):
+        """
+        Draw bounding boxes on detected bodies.
+        """
+        for (x, y, w, h) in bodies:
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0,255,0), 2)
+            cv2.putText(frame, "Human", (x, y - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+        return frame
