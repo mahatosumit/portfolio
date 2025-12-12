@@ -1,189 +1,146 @@
-import cv2
-import numpy as np
-import serial
+# main.py
+# TravaX Autonomous Rover – Ultrasonic + Vision + Motor Control
+
 import time
-from gpiozero import DistanceSensor
+import cv2
+from motor import MotorController
+from sensor import UltrasonicSensors
+from camera import Camera
+from vision import Vision   # Haar-based human detector
 
-# =====================================================
-# SERIAL → Arduino
-# =====================================================
-ser = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
-time.sleep(2)
+# ------------------ PARAMETERS ------------------
+TH_CENTER_STOP = 25.0      # Stop immediately if obstacle < 25 cm
+TH_SIDE_CAUTION = 45.0     # Avoid walls/sides < 45 cm
+FORWARD_STEP = 0.20        # Forward burst in seconds
+STRAFE_STEP = 0.35         # Side step duration
+ROTATE_STEP = 0.35         # Rotation duration
+LOOP_DELAY = 0.10          # Delay between loop cycles
 
-def send(cmd):
-    ser.write((cmd + "\n").encode())
-    print("[CMD]", cmd)
+# ------------------ HELPERS ------------------
+def d(v):
+    return float('inf') if v is None else float(v)
 
+def log(*args):
+    print(*args, flush=True)
 
-# =====================================================
-# ULTRASONIC SENSORS
-# =====================================================
-front_left  = DistanceSensor(echo=27, trigger=17, max_distance=4)
-front_right = DistanceSensor(echo=23, trigger=22, max_distance=4)
-back        = DistanceSensor(echo=25, trigger=24, max_distance=4)
+# Motor wrapper
+class RoverMotor:
+    def __init__(self):
+        self.mc = MotorController("/dev/ttyACM0")
+        log("Motor controller connected")
 
-OBSTACLE = 25  # cm threshold
+    def send(self, cmd):
+        try:
+            ack = self.mc.send(cmd)
+            log(ack)
+        except Exception as e:
+            log("Motor command error:", e)
 
+    def forward(self): self.send("FWD")
+    def backward(self): self.send("BACK")
+    def left(self): self.send("LEFT")
+    def right(self): self.send("RIGHT")
+    def strafe_left(self): self.send("SL")
+    def strafe_right(self): self.send("SR")
+    def stop(self): self.send("STOP")
 
-# =====================================================
-# LOAD MobileNet SSD MODEL (VISION LOGIC)
-# =====================================================
-net = cv2.dnn.readNetFromCaffe(
-    "deploy.prototxt",
-    "MobileNetSSD_deploy.caffemodel"
-)
+# ------------------ MAIN CONTROL LOGIC ------------------
+def main():
+    motor = RoverMotor()
+    sensor = UltrasonicSensors()
+    cam = Camera()
+    vision = Vision()
 
-CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
-           "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
-           "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
-           "sofa", "train", "tvmonitor"]
+    log("System ready. Press CTRL+C to stop.")
 
+    try:
+        while True:
 
-# =====================================================
-# FIXED CAMERA INITIALIZATION FOR PI3 + BOOKWORM
-# =====================================================
-cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+            # ----------- SENSOR READINGS -----------
+            dist = sensor.read_all()
+            FL, FC, FR, RE = d(dist["FL"]), d(dist["FC"]), d(dist["FR"]), d(dist["RE"])
+            log(f"US: FL={FL}  FC={FC}  FR={FR}  RE={RE}")
 
-# MUST SET LOWER RESOLUTION (otherwise Pi3 will fail allocation)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-cap.set(cv2.CAP_PROP_FPS, 30)
+            # ----------- CAMERA FRAME ----------
+            frame = cam.get_frame()
+            if frame is None:
+                motor.stop()
+                continue
 
-time.sleep(2)  # camera warmup
+            # ----------- HUMAN DETECTION ----------
+            humans = vision.detect(frame)
+            display = vision.annotate(frame, humans)
 
-if not cap.isOpened():
-    print("ERROR: Camera failed to open. Exiting.")
-    exit()
+            if len(humans) > 0:
+                log("HUMAN DETECTED → STOP")
+                motor.stop()
+                cv2.imshow("TravaX Vision", display)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                time.sleep(0.1)
+                continue
 
+            # ----------- OBSTACLE AVOIDANCE ----------
+            # Close obstacle directly in front
+            if FC < TH_CENTER_STOP:
+                log("Obstacle front → STOP + sidestep")
+                motor.stop()
 
-# =====================================================
-# MOVEMENT TUNING
-# =====================================================
-FORWARD_SPEED = 150
-STRAFE_SPEED  = 140
-TURN_SPEED    = 140
+                # Choose safer side based on left/right distance
+                if FR > FL:
+                    motor.strafe_right()
+                else:
+                    motor.strafe_left()
 
-STRAFE_TIME = 0.60
-TURN_TIME   = 0.70
-BACKUP_TIME = 0.50
+                time.sleep(STRAFE_STEP)
+                motor.stop()
+                time.sleep(0.1)
 
+            # Side avoidance
+            elif FL < TH_SIDE_CAUTION:
+                log("Left side too close → strafe right")
+                motor.strafe_right()
+                time.sleep(STRAFE_STEP)
+                motor.stop()
 
-# =====================================================
-# AUTO-RECOVERY FUNCTION
-# =====================================================
-def auto_recover():
-    print("AUTO-RECOVERY TRIGGERED")
+            elif FR < TH_SIDE_CAUTION:
+                log("Right side too close → strafe left")
+                motor.strafe_left()
+                time.sleep(STRAFE_STEP)
+                motor.stop()
 
-    send("<STOP>")
-    time.sleep(0.2)
+            # Rear avoidance
+            elif RE < TH_CENTER_STOP:
+                log("Rear close → move forward slightly")
+                motor.forward()
+                time.sleep(FORWARD_STEP)
+                motor.stop()
 
-    send(f"<MOVE|B|{FORWARD_SPEED}>")
-    time.sleep(BACKUP_TIME)
-    send("<STOP>")
-    time.sleep(0.2)
+            # Clear path → move forward in small steps
+            else:
+                log("Path clear → forward step")
+                motor.forward()
+                time.sleep(FORWARD_STEP)
+                motor.stop()
 
-    send(f"<MOVE|CW|{TURN_SPEED}>")
-    time.sleep(TURN_TIME)
-    send("<STOP>")
-    time.sleep(0.2)
+            # Show camera window
+            cv2.imshow("TravaX Vision", display)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
 
+            time.sleep(LOOP_DELAY)
 
-# =====================================================
-# MAIN LOOP (VISION + ULTRASONIC)
-# =====================================================
-while True:
+    except KeyboardInterrupt:
+        log("Shutdown by user.")
 
-    # ----------- ULTRASONIC VALUES -----------
-    fl = front_left.distance * 100
-    fr = front_right.distance * 100
-    bk = back.distance * 100
+    except Exception as e:
+        log("Fatal error:", e)
 
-    print(f"FL:{fl:.1f}  FR:{fr:.1f}  BK:{bk:.1f}")
+    finally:
+        motor.stop()
+        cv2.destroyAllWindows()
+        log("System stopped safely.")
 
-    # ----------- CAMERA FRAME -----------
-    ret, frame = cap.read()
-
-    if not ret:
-        print("WARN: Camera frame read failed")
-        time.sleep(0.1)
-        continue
-
-    # ----------- PERSON DETECTION -----------
-    blob = cv2.dnn.blobFromImage(
-        cv2.resize(frame, (300, 300)),
-        0.007843, (300, 300), 127.5
-    )
-    net.setInput(blob)
-    detections = net.forward()
-
-    person_detected = False
-
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-
-        if confidence > 0.50:
-            idx = int(detections[0, 0, i, 1])
-            label = CLASSES[idx]
-
-            if label == "person":
-                person_detected = True
-
-                box = detections[0, 0, i, 3:7] * np.array(
-                    [frame.shape[1], frame.shape[0],
-                     frame.shape[1], frame.shape[0]]
-                )
-                (x1, y1, x2, y2) = box.astype("int")
-
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, "PERSON", (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                            (0, 255, 0), 2)
-
-    # ----------- SAFETY: PERSON STOP -----------
-    if person_detected:
-        print("PERSON DETECTED → STOP")
-        send("<STOP>")
-        time.sleep(3)
-        continue
-
-
-    # ----------- ULTRASONIC OBSTACLE AVOIDANCE -----------
-
-    # Front completely blocked → stuck
-    if fl < OBSTACLE and fr < OBSTACLE:
-        print("FRONT BLOCKED → AUTO RECOVERY")
-        auto_recover()
-        continue
-
-    # Left wall → strafe right
-    if fl < OBSTACLE:
-        print("LEFT BLOCK → STRAFE RIGHT")
-        send(f"<MOVE|R|{STRAFE_SPEED}>")
-        time.sleep(STRAFE_TIME)
-        send("<STOP>")
-        continue
-
-    # Right wall → strafe left
-    if fr < OBSTACLE:
-        print("RIGHT BLOCK → STRAFE LEFT")
-        send(f"<MOVE|L|{STRAFE_SPEED}>")
-        time.sleep(STRAFE_TIME)
-        send("<STOP>")
-        continue
-
-    # Back obstacle
-    if bk < OBSTACLE:
-        print("BACK BLOCKED → HOLD")
-        send("<STOP>")
-        continue
-
-    # ----------- DEFAULT MOVEMENT: FORWARD -----------
-    print("CLEAR PATH → MOVE FORWARD")
-    send(f"<MOVE|F|{FORWARD_SPEED}>")
-
-    # ----------- OPTIONAL PREVIEW -----------
-    cv2.imshow("Rover Navigation Preview", frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-    time.sleep(0.1)
+# ------------------ ENTRY ------------------
+if __name__ == "__main__":
+    main()
