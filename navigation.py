@@ -1,129 +1,153 @@
 # main.py
-# TravaX Autonomous Rover – Ultrasonic + Vision + Motor Control
+# Final reliable autonomous rover: ultrasonic obstacle avoidance + Haar human-stop
+# Uses motor.py, sensor.py, camera.py, vision.py in same folder.
 
 import time
 import cv2
 from motor import MotorController
 from sensor import UltrasonicSensors
 from camera import Camera
-from vision import Vision   # Haar-based human detector
+from vision import Vision
 
-# ------------------ PARAMETERS ------------------
-TH_CENTER_STOP = 25.0      # Stop immediately if obstacle < 25 cm
-TH_SIDE_CAUTION = 45.0     # Avoid walls/sides < 45 cm
-FORWARD_STEP = 0.20        # Forward burst in seconds
-STRAFE_STEP = 0.35         # Side step duration
-ROTATE_STEP = 0.35         # Rotation duration
-LOOP_DELAY = 0.10          # Delay between loop cycles
+# ---------- Config (tune if needed) ----------
+TH_CENTER_STOP = 25.0     # cm, immediate stop threshold
+TH_SIDE_CAUTION = 45.0    # cm, side caution threshold
+FORWARD_STEP = 0.20       # seconds of forward motion for small advance
+STRAFE_STEP = 0.35        # seconds to perform a strafe
+LOOP_DELAY = 0.10         # main loop base delay
 
-# ------------------ HELPERS ------------------
-def d(v):
+# ---------- Helpers ----------
+def safe_float(v):
     return float('inf') if v is None else float(v)
 
 def log(*args):
     print(*args, flush=True)
 
-# Motor wrapper
+# ---------- Motor wrapper ----------
 class RoverMotor:
-    def __init__(self):
-        self.mc = MotorController("/dev/ttyACM0")
-        log("Motor controller connected")
-
-    def send(self, cmd):
+    def __init__(self, port="/dev/ttyACM0"):
         try:
-            ack = self.mc.send(cmd)
-            log(ack)
+            self.mc = MotorController(port=port)
+            log("MotorController connected")
         except Exception as e:
-            log("Motor command error:", e)
+            log("Motor init error:", e)
+            raise
 
-    def forward(self): self.send("FWD")
-    def backward(self): self.send("BACK")
-    def left(self): self.send("LEFT")
-    def right(self): self.send("RIGHT")
-    def strafe_left(self): self.send("SL")
-    def strafe_right(self): self.send("SR")
-    def stop(self): self.send("STOP")
+    def forward(self): self.mc.forward()
+    def backward(self): self.mc.backward()
+    def rotate_left(self): self.mc.rotate_left()
+    def rotate_right(self): self.mc.rotate_right()
+    def strafe_left(self): self.mc.strafe_left()
+    def strafe_right(self): self.mc.strafe_right()
+    def stop(self): self.mc.stop()
 
-# ------------------ MAIN CONTROL LOGIC ------------------
+# ---------- Main logic ----------
 def main():
-    motor = RoverMotor()
-    sensor = UltrasonicSensors()
-    cam = Camera()
-    vision = Vision()
+    motor = None
+    sensors = None
+    cam = None
+    vision = None
 
-    log("System ready. Press CTRL+C to stop.")
+    try:
+        motor = RoverMotor()
+        sensors = UltrasonicSensors()
+        cam = Camera()
+        vision = Vision()
+    except Exception as e:
+        log("Initialization failed:", e)
+        # Ensure safe stop if motors were initialized
+        if motor:
+            try: motor.stop()
+            except: pass
+        return
+
+    log("System ready. Ctrl+C to stop.")
 
     try:
         while True:
+            # Read ultrasonics
+            try:
+                us = sensors.read_all()
+            except Exception as e:
+                log("Ultrasonic read error:", e)
+                us = {'FL': None, 'FC': None, 'FR': None, 'RE': None}
 
-            # ----------- SENSOR READINGS -----------
-            dist = sensor.read_all()
-            FL, FC, FR, RE = d(dist["FL"]), d(dist["FC"]), d(dist["FR"]), d(dist["RE"])
-            log(f"US: FL={FL}  FC={FC}  FR={FR}  RE={RE}")
+            FL = safe_float(us.get('FL'))
+            FC = safe_float(us.get('FC'))
+            FR = safe_float(us.get('FR'))
+            RE = safe_float(us.get('RE'))
 
-            # ----------- CAMERA FRAME ----------
+            log(f"US -> FL:{FL:.1f} FC:{FC:.1f} FR:{FR:.1f} RE:{RE:.1f}")
+
+            # Read camera
             frame = cam.get_frame()
             if frame is None:
+                log("No camera frame - stopping for safety")
                 motor.stop()
+                time.sleep(0.2)
                 continue
 
-            # ----------- HUMAN DETECTION ----------
-            humans = vision.detect(frame)
-            display = vision.annotate(frame, humans)
+            # Vision detection
+            bodies = vision.detect(frame)
+            display = vision.annotate(frame, bodies)
 
-            if len(humans) > 0:
-                log("HUMAN DETECTED → STOP")
+            # Vision priority: if human present -> stop immediately
+            if len(bodies) > 0:
+                log("Human detected -> STOP")
                 motor.stop()
                 cv2.imshow("TravaX Vision", display)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
+                # wait short so human can move away; then continue sensing
+                time.sleep(0.2)
+                continue
+
+            # Ultrasonic obstacle avoidance (highest priority next)
+            if FC < TH_CENTER_STOP:
+                log("FRONT OBSTACLE -> STOP then sidestep")
+                motor.stop()
+                # choose safer side by comparing FL/FR; treat None as far
+                if FR >= FL:
+                    motor.strafe_right()
+                    log("Strafing right")
+                else:
+                    motor.strafe_left()
+                    log("Strafing left")
+                time.sleep(STRAFE_STEP)
+                motor.stop()
                 time.sleep(0.1)
                 continue
 
-            # ----------- OBSTACLE AVOIDANCE ----------
-            # Close obstacle directly in front
-            if FC < TH_CENTER_STOP:
-                log("Obstacle front → STOP + sidestep")
-                motor.stop()
-
-                # Choose safer side based on left/right distance
-                if FR > FL:
-                    motor.strafe_right()
-                else:
-                    motor.strafe_left()
-
-                time.sleep(STRAFE_STEP)
-                motor.stop()
-                time.sleep(0.1)
-
-            # Side avoidance
-            elif FL < TH_SIDE_CAUTION:
-                log("Left side too close → strafe right")
+            # side avoidance
+            if FL < TH_SIDE_CAUTION:
+                log("Left too close -> strafe right")
                 motor.strafe_right()
                 time.sleep(STRAFE_STEP)
                 motor.stop()
+                continue
 
-            elif FR < TH_SIDE_CAUTION:
-                log("Right side too close → strafe left")
+            if FR < TH_SIDE_CAUTION:
+                log("Right too close -> strafe left")
                 motor.strafe_left()
                 time.sleep(STRAFE_STEP)
                 motor.stop()
+                continue
 
-            # Rear avoidance
-            elif RE < TH_CENTER_STOP:
-                log("Rear close → move forward slightly")
+            # rear avoidance
+            if RE < TH_CENTER_STOP:
+                log("Rear close -> small forward bump")
                 motor.forward()
                 time.sleep(FORWARD_STEP)
                 motor.stop()
+                continue
 
-            # Clear path → move forward in small steps
-            else:
-                log("Path clear → forward step")
-                motor.forward()
-                time.sleep(FORWARD_STEP)
-                motor.stop()
+            # default: forward small bursts, repeatedly re-evaluate
+            log("Path clear -> forward step")
+            motor.forward()
+            time.sleep(FORWARD_STEP)
+            motor.stop()
 
-            # Show camera window
+            # show camera window (non-blocking)
             cv2.imshow("TravaX Vision", display)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -131,16 +155,22 @@ def main():
             time.sleep(LOOP_DELAY)
 
     except KeyboardInterrupt:
-        log("Shutdown by user.")
+        log("User interrupted - stopping")
 
     except Exception as e:
-        log("Fatal error:", e)
+        log("Runtime error:", e)
 
     finally:
-        motor.stop()
+        try:
+            motor.stop()
+        except Exception:
+            pass
+        try:
+            cam.release()
+        except Exception:
+            pass
         cv2.destroyAllWindows()
-        log("System stopped safely.")
+        log("Shutdown complete.")
 
-# ------------------ ENTRY ------------------
 if __name__ == "__main__":
     main()
