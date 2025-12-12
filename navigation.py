@@ -1,34 +1,31 @@
 import time
 from motor import MotorController
 from sensor import UltrasonicSensors
-from vision import HaarVision
+from vision import Vision   # <-- FIXED IMPORT
 
-RUN_TIME = 120   # 2 minutes
+RUN_TIME = 120  # 2 minutes
 
 def main():
-    print("TravaX Rover Ready (2-minute run mode enabled)")
+    print("TravaX Rover Ready (2-minute run mode)")
 
     mc = MotorController()
     us = UltrasonicSensors()
-    vision = HaarVision()
+    vision = Vision()   # <-- FIXED CLASS NAME
 
-    start_time = time.time()
+    start = time.time()
 
     while True:
 
-        # ========================
-        # AUTO STOP AFTER 2 MINUTES
-        # ========================
-        elapsed = time.time() - start_time
-        if elapsed >= RUN_TIME:
-            print("\n=== 2 MINUTES FINISHED — STOPPING ROVER ===")
+        # ===== AUTO STOP AFTER 2 MINUTES =====
+        if time.time() - start >= RUN_TIME:
+            print("\n=== 2 MINUTES COMPLETE — STOPPING ROVER ===")
             mc.stop()
             time.sleep(0.5)
-            print("Rover stopped safely.\n")
+            print("Rover stopped safely.")
             break
 
         try:
-            # ----- ULTRASONIC -----
+            # --- READ ULTRASONIC ---
             dist = us.read_all()
             FL, FC, FR, RE = dist["FL"], dist["FC"], dist["FR"], dist["RE"]
 
@@ -37,19 +34,23 @@ def main():
             rear_blocked  = RE < 15
             front_blocked = (FC < 25) or (FL < 20)
 
-            # ----- CAMERA -----
-            face = vision.detect()
+            # --- CAMERA FRAME ---
+            frame = vision.capture() if hasattr(vision, "capture") else None
 
-            # ===== LOGIC =====
+            bodies = []
+            if frame is not None:
+                bodies = vision.detect(frame)
+
+            # ===== DECISION LOGIC =====
             if rear_blocked:
-                print("Obstacle REAR → forward bump")
+                print("Rear obstacle → forward bump")
                 mc.forward()
                 time.sleep(0.15)
                 mc.stop()
                 continue
 
-            if face is not None:
-                print("Face detected → stopping")
+            if len(bodies) > 0:
+                print("Human detected → STOP")
                 mc.stop()
                 continue
 
@@ -68,8 +69,7 @@ def main():
             mc.stop()
 
         except Exception as e:
-            # DO NOT STOP THE PROGRAM
-            print("[WARNING — continuing]", e)
+            print("[WARNING — continuing loop]", e)
             time.sleep(0.1)
             continue
 
