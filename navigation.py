@@ -42,3 +42,14 @@ print("Torch:", torch.__version__)
 model = YOLO("yolov8n.pt")
 print("YOLO model loaded")
 EOF
+
+
+
+python - <<EOF
+import cv2
+cap = cv2.VideoCapture(0)
+print("Camera opened:", cap.isOpened())
+ret, frame = cap.read()
+print("Frame:", ret, frame.shape if ret else None)
+cap.release()
+EOF
