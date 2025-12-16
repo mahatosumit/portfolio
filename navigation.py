@@ -31,3 +31,14 @@ print("Python OK")
 print("OpenCV:", cv2.__version__)
 print("Torch:", torch.__version__)
 EOF
+
+python - <<EOF
+import cv2, torch
+from ultralytics import YOLO
+
+print("OpenCV:", cv2.__version__)
+print("Torch:", torch.__version__)
+
+model = YOLO("yolov8n.pt")
+print("YOLO model loaded")
+EOF
