@@ -1,14 +1,17 @@
-sudo apt update
-sudo apt install -y code
+import serial
+import time
 
+class RoverSerial:
+    def __init__(self, port="/dev/ttyACM0", baud=115200):
+        self.ser = serial.Serial(port, baud, timeout=0.1)
+        time.sleep(2)  # wait for Arduino reset
+        self.last_cmd = None
 
-code --version
+    def send(self, cmd):
+        if cmd != self.last_cmd:
+            self.ser.write((cmd + "\n").encode())
+            self.last_cmd = cmd
 
-
-wget -qO- https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/ms.gpg
-echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ms.gpg] https://packages.microsoft.com/repos/code stable main" | sudo tee /etc/apt/sources.list.d/vscode.list
-sudo apt update
-sudo apt install -y code
-
-
-code --disable-gpu
+    def close(self):
+        self.ser.write(b"STOP\n")
+        self.ser.close()
