@@ -1,17 +1,10 @@
+python - <<EOF
 import cv2
+print("cv2 OK:", cv2.__version__)
+print("GStreamer:", "YES" if "GStreamer:                   YES" in cv2.getBuildInformation() else "NO")
+EOF
 
-gst = "v4l2src device=/dev/video8 ! videoconvert ! appsink"
 
-cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
-print("Opened:", cap.isOpened())
-
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
-    cv2.imshow("USB Cam", frame)
-    if cv2.waitKey(1) & 0xFF == 27:
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+pip install --upgrade pip
+pip install ultralytics pyserial numpy pillow
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
