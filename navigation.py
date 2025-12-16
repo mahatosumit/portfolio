@@ -1,17 +1,22 @@
 python - <<EOF
+from picamera2 import Picamera2
 import cv2
+import time
 
-cap = cv2.VideoCapture("/dev/video8", cv2.CAP_V4L2)
+picam2 = Picamera2()
+picam2.configure(picam2.create_video_configuration(
+    main={"size": (640, 480), "format": "RGB888"}
+))
+picam2.start()
 
-# DO NOT set MJPG (unsupported)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+time.sleep(1)
 
-print("Opened:", cap.isOpened())
+frame = picam2.capture_array()
+print(frame.shape)  # should be (480, 640, 3)
 
-for i in range(5):
-    ret, frame = cap.read()
-    print(i, ret, None if not ret else frame.shape)
+cv2.imshow("Frame", frame)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
 
-cap.release()
+picam2.stop()
 EOF
