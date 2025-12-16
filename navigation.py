@@ -1,9 +1,33 @@
-sudo apt update
-sudo apt install -y \
-build-essential \
-libssl-dev zlib1g-dev \
-libbz2-dev libreadline-dev \
-libsqlite3-dev libffi-dev \
-libncursesw5-dev xz-utils \
-tk-dev libxml2-dev libxmlsec1-dev \
-llvm git curl
+echo 'export PYENV_ROOT="$HOME/.pyenv"' >> ~/.bashrc
+echo 'export PATH="$PYENV_ROOT/bin:$PATH"' >> ~/.bashrc
+echo 'eval "$(pyenv init --path)"' >> ~/.bashrc
+echo 'eval "$(pyenv init -)"' >> ~/.bashrc
+
+
+source ~/.bashrc
+
+pyenv --version
+
+pyenv install 3.11.9
+
+cd ~/rover
+pyenv local 3.11.9
+
+
+python --version
+
+python -m venv rover_env
+source rover_env/bin/activate
+
+python --version
+
+pip install --upgrade pip setuptools wheel
+pip install ultralytics opencv-python numpy pillow
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+python - <<EOF
+import cv2, torch
+print("Python OK")
+print("OpenCV:", cv2.__version__)
+print("Torch:", torch.__version__)
+EOF
