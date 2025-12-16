@@ -4,25 +4,46 @@ import onnxruntime as ort
 import serial
 import time
 
-# ===== CONFIG =====
-WIDTH, HEIGHT = 640, 480
-FRAME_SIZE = WIDTH * HEIGHT * 3  # RGB24
+# ================= CONFIG =================
+CAM_W, CAM_H = 640, 480
+MODEL_W, MODEL_H = 640, 640
+FRAME_SIZE = CAM_W * CAM_H * 3  # RGB24
 
-# ===== SERIAL =====
+# ================= SERIAL =================
 ser = serial.Serial("/dev/ttyACM0", 115200, timeout=0.1)
 time.sleep(2)
 
 def send(cmd):
     ser.write((cmd + "\n").encode())
 
-# ===== ONNX =====
+# ================= LETTERBOX (NO OPENCV) =================
+def letterbox(img, new_shape=(640, 640), color=114):
+    h, w, _ = img.shape
+    new_h, new_w = new_shape
+
+    scale = min(new_w / w, new_h / h)
+    rw, rh = int(w * scale), int(h * scale)
+
+    # Resize (nearest neighbor, fast & acceptable here)
+    resized = np.zeros((rh, rw, 3), dtype=np.uint8)
+    for c in range(3):
+        resized[:, :, c] = np.resize(img[:, :, c], (rh, rw))
+
+    padded = np.full((new_h, new_w, 3), color, dtype=np.uint8)
+    top = (new_h - rh) // 2
+    left = (new_w - rw) // 2
+
+    padded[top:top + rh, left:left + rw] = resized
+    return padded, scale, top, left
+
+# ================= ONNX =================
 session = ort.InferenceSession(
     "models/yolov8n.onnx",
     providers=["CPUExecutionProvider"]
 )
 input_name = session.get_inputs()[0].name
 
-# ===== CAMERA PIPE =====
+# ================= CAMERA PIPE =================
 cmd = [
     "ffmpeg",
     "-f", "v4l2",
@@ -36,26 +57,32 @@ cmd = [
 
 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
 
-while True:
-    raw = proc.stdout.read(FRAME_SIZE)
-    if len(raw) != FRAME_SIZE:
-        break
+# ================= MAIN LOOP =================
+try:
+    while True:
+        raw = proc.stdout.read(FRAME_SIZE)
+        if len(raw) != FRAME_SIZE:
+            break
 
-    frame = np.frombuffer(raw, dtype=np.uint8)
-    frame = frame.reshape((HEIGHT, WIDTH, 3))
+        frame = np.frombuffer(raw, dtype=np.uint8)
+        frame = frame.reshape((CAM_H, CAM_W, 3))
 
-    # ===== YOLO PREPROCESS =====
-    img = frame.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))
-    img = np.expand_dims(img, axis=0)
+        # ---- LETTERBOX TO 640x640 ----
+        img640, scale, pad_top, pad_left = letterbox(frame)
 
-    outputs = session.run(None, {input_name: img})
+        # ---- YOLO PREPROCESS ----
+        img = img640.astype(np.float32) / 255.0
+        img = np.transpose(img, (2, 0, 1))  # CHW
+        img = np.expand_dims(img, axis=0)   # NCHW
 
-    # ===== BASIC DECISION LOGIC =====
-    detections = outputs[0]
-    cmd_out = "STOP" if detections.shape[1] > 0 else "FWD"
+        outputs = session.run(None, {input_name: img})
 
-    send(cmd_out)
+        # ---- BASIC DECISION LOGIC (PLACEHOLDER) ----
+        detections = outputs[0]
+        cmd_out = "STOP" if detections.shape[1] > 0 else "FWD"
 
-proc.terminate()
-ser.close()
+        send(cmd_out)
+
+finally:
+    proc.terminate()
+    ser.close()
