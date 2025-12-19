@@ -3,170 +3,280 @@ import time
 import serial
 import numpy as np
 
-# --- CONFIGURATION ---
-SERIAL_PORT = '/dev/ttyACM0'
+# ==============================================================================
+# CONFIGURATION & TUNING PARAMETERS
+# ==============================================================================
+
+# Hardware Settings
+SERIAL_PORT = '/dev/ttyACM0'  # Verify if using /dev/ttyUSB0 or /dev/ttyAMA0
 BAUD_RATE = 115200
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
 
-# Speeds
-SPEED_NORMAL = 150
-SPEED_CAUTION = 100
-SPEED_STOP = 0
+# Speed Control (PWM Values)
+SPEED_NORMAL = 150       # Standard cruising speed
+SPEED_SLOW = 100         # For curves or caution zones
+SPEED_STOP = 0           # Complete stop
 
-# Thresholds (The "Automatic" Decision Factors)
-# If a sign covers more than this % of the screen height, act on it.
-# 0.25 means the sign is 1/4th the height of the image (very close).
-TRIGGER_SIZE_RATIO = 0.25 
+# Steering Control (P-Controller)
+MAX_STEER_ANGLE = 250    # Servo limit (-250 to 250)
+KP = 0.8                 # Proportional Gain (Sensitivity)
+CENTER_IMAGE_X = CAMERA_WIDTH // 2
+
+# Traffic Rule Logic
+MIN_SIGN_SIZE_RATIO = 0.20  # Sign must cover 20% of screen height to be valid
+STOP_WAIT_TIME = 3.0        # Seconds to wait at a stop sign
+
+# ==============================================================================
+# 1. DRIVER INTERFACE (HARDWARE ABSTRACTION)
+# ==============================================================================
 
 class STM32Controller:
     def __init__(self, port, baud):
+        self.ser = None
         try:
             self.ser = serial.Serial(port, baud, timeout=1)
-            time.sleep(2)
-            print("✔ STM32 Connected")
-        except:
-            print("❌ STM32 Connection Failed")
-            self.ser = None
+            time.sleep(2) # Allow handshake time
+            print("[HARDWARE] Connected to STM32 Microcontroller.")
+        except Exception as e:
+            print(f"[ERROR] Serial Connection Failed: {e}")
 
-    def send(self, speed, steer):
-        if self.ser is None: return
-        cmd = f"#steer:{int(steer)};;#speed:{int(speed)};;\r\n"
-        self.ser.write(cmd.encode('utf-8'))
+    def send_command(self, speed, steer):
+        if self.ser is None:
+            return
 
-class TrafficManager:
+        # Clamp values for safety
+        steer = max(-MAX_STEER_ANGLE, min(MAX_STEER_ANGLE, int(steer)))
+        speed = int(speed)
+
+        # Format strictly: #steer:value;;#speed:value;;
+        command = f"#steer:{steer};;#speed:{speed};;\r\n"
+        try:
+            self.ser.write(command.encode('utf-8'))
+        except Exception as e:
+            print(f"[ERROR] Serial Write Failed: {e}")
+
+    def emergency_stop(self):
+        self.send_command(0, 0)
+        if self.ser:
+            try:
+                self.ser.write(b"#brake:1;;\r\n")
+            except:
+                pass
+
+# ==============================================================================
+# 2. TRAFFIC BRAIN (STATE MACHINE)
+# ==============================================================================
+
+class TrafficBrain:
     def __init__(self):
-        self.state = "WAITING_FOR_START" # Initial State
-        self.stop_start_time = 0
-        self.min_stop_duration = 3.0 # Seconds to wait at STOP sign
+        # States: WAITING_START, DRIVING, STOPPING, INTERSECTION_COOLDOWN
+        self.state = "WAITING_START"
+        self.timer_start = 0
+        self.last_sign_time = 0
 
-    def check_rules(self, frame, current_speed):
+    def process_rules(self, frame_height, detected_sign_label, sign_height):
         """
-        Input: Camera Frame
-        Output: Adjusted Speed (int), Status Message (str)
+        Decides the target speed based on traffic rules and current state.
+        Returns: (target_speed, status_message)
         """
-        h_img, w_img, _ = frame.shape
         
-        # --- 1. DETECT SIGNS (Placeholder for your NCNN Model) ---
-        # Replace this block with your actual sign detection inference
-        # It must return: label (str), box_height (int)
-        
-        label, box_h = self.dummy_detection(frame) 
-        # ---------------------------------------------------------
+        # Calculate sign relevance (how close is it?)
+        sign_ratio = 0
+        if sign_height > 0:
+            sign_ratio = sign_height / frame_height
 
-        # Calculate how "big" the sign is relative to the screen
-        ratio = box_h / h_img 
-
-        # --- STATE MACHINE ---
-        
-        # STATE 1: WAITING AT START LINE
-        if self.state == "WAITING_FOR_START":
-            if label == "START" and ratio > 0.1: # If we see start sign
+        # STATE 1: WAITING FOR START SIGNAL
+        if self.state == "WAITING_START":
+            # If we see a START sign close enough, begin mission
+            if detected_sign_label == "START" and sign_ratio > 0.1:
                 self.state = "DRIVING"
-                return SPEED_NORMAL, "🚀 GO!"
-            return 0, "⏳ WAITING FOR START..."
+                return SPEED_NORMAL, "STATUS: MISSION STARTED"
+            
+            return 0, "STATUS: WAITING FOR SIGNAL"
 
-        # STATE 2: STOP SIGN HANDLING
-        elif self.state == "STOPPED_AT_SIGN":
-            elapsed = time.time() - self.stop_start_time
-            if elapsed > self.min_stop_duration:
-                self.state = "COOLDOWN" # Prevent stopping again immediately
-                return SPEED_NORMAL, "✅ RESUMING"
+        # STATE 2: STOPPING AT INTERSECTION
+        elif self.state == "STOPPING":
+            elapsed_time = time.time() - self.timer_start
+            if elapsed_time >= STOP_WAIT_TIME:
+                self.state = "INTERSECTION_COOLDOWN"
+                self.timer_start = time.time()
+                return SPEED_NORMAL, "STATUS: RESUMING MOTION"
             else:
-                return 0, f"🛑 STOPPING ({int(3-elapsed)}s)"
+                remaining = int(STOP_WAIT_TIME - elapsed_time) + 1
+                return 0, f"STATUS: STOPPED ({remaining}s)"
 
-        # STATE 3: COOLDOWN (Ignore signs for 2 seconds after stopping)
-        elif self.state == "COOLDOWN":
-            if time.time() - self.stop_start_time > (self.min_stop_duration + 5):
+        # STATE 3: COOLDOWN (Ignoring signs just after an intersection)
+        elif self.state == "INTERSECTION_COOLDOWN":
+            # Drive blindly for 4 seconds to clear the intersection so we don't stop twice
+            if time.time() - self.timer_start > 4.0:
                 self.state = "DRIVING"
-            return current_speed, "💨 DRIVING (Cooldown)"
+            return SPEED_NORMAL, "STATUS: CLEARING INTERSECTION"
 
-        # STATE 4: NORMAL DRIVING (Looking for signs)
+        # STATE 4: NORMAL DRIVING
         elif self.state == "DRIVING":
-            # Only react if the sign is CLOSE (Big enough)
-            if ratio > TRIGGER_SIZE_RATIO:
-                if label == "STOP":
-                    self.state = "STOPPED_AT_SIGN"
-                    self.stop_start_time = time.time()
-                    return 0, "🛑 STOP SIGN TRIGGERED"
+            # Check for signs only if they are close enough (Relevant)
+            if sign_ratio > MIN_SIGN_SIZE_RATIO:
                 
-                elif label == "SLOW":
-                    return SPEED_CAUTION, "⚠ SLOW DOWN"
+                if detected_sign_label == "STOP":
+                    self.state = "STOPPING"
+                    self.timer_start = time.time()
+                    return 0, "STATUS: STOP SIGN DETECTED"
                 
-                elif label == "END":
-                    return 0, "🏁 END OF TRACK"
+                elif detected_sign_label == "SLOW":
+                    return SPEED_SLOW, "STATUS: CAUTION ZONE"
+                
+                elif detected_sign_label == "LIMIT_50":
+                    return SPEED_SLOW, "STATUS: SPEED LIMIT 50"
 
-            return current_speed, "🚗 AUTOPILOT"
+            return SPEED_NORMAL, "STATUS: AUTOPILOT ACTIVE"
 
-        return 0, "ERROR"
+        return 0, "STATUS: UNKNOWN STATE"
 
-    def dummy_detection(self, frame):
+# ==============================================================================
+# 3. VISION SYSTEM (PERCEPTION)
+# ==============================================================================
+
+class PerceptionSystem:
+    def __init__(self):
+        # Initialize NCNN or Models here
+        print("[VISION] System Initialized.")
+
+    def detect_signs(self, frame):
         """
-        Temporary color-based detector for testing without AI.
-        Returns: Label, Height
+        REPLACE THIS with your actual Object Detection Model (YOLO/NanoDet).
+        Currently uses Color Thresholding for testing without a model.
+        Returns: (label_string, box_height_pixels)
         """
-        # Convert to HSV
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
-        # Detect RED (Stop Sign)
-        mask_red = cv2.inRange(hsv, np.array([0, 120, 70]), np.array([10, 255, 255]))
+        # 1. Detect STOP (Red)
+        # Range for red is tricky because it wraps around 0-180
+        mask1 = cv2.inRange(hsv, np.array([0, 70, 50]), np.array([10, 255, 255]))
+        mask2 = cv2.inRange(hsv, np.array([170, 70, 50]), np.array([180, 255, 255]))
+        mask_red = mask1 | mask2
+        
         contours, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in contours:
-            _, _, _, h = cv2.boundingRect(c)
-            if h > 50: return "STOP", h
+            x, y, w, h = cv2.boundingRect(c)
+            # Filter noise
+            if h > 40: 
+                return "STOP", h
 
-        # Detect GREEN (Start Sign)
-        mask_green = cv2.inRange(hsv, np.array([40, 40, 40]), np.array([70, 255, 255]))
+        # 2. Detect START (Green)
+        mask_green = cv2.inRange(hsv, np.array([40, 40, 40]), np.array([80, 255, 255]))
         contours_g, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in contours_g:
-            _, _, _, h = cv2.boundingRect(c)
-            if h > 50: return "START", h
-            
+            x, y, w, h = cv2.boundingRect(c)
+            if h > 40:
+                return "START", h
+
         return None, 0
 
-# --- LANE DETECTION (Keep your NCNN logic here) ---
-class LaneDetector:
-    # ... (Paste your NCNN LaneDetector class from previous step here) ...
-    def get_lane_center(self, frame):
-        # Placeholder logic
-        return 320 # Returns center for now
+    def detect_lane_center(self, frame):
+        """
+        REPLACE THIS with your Lane Segmentation Model (NCNN).
+        Currently uses a simple brightness centroid for testing.
+        Returns: x_coordinate (int) or None
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Focus on the bottom half of the image
+        roi = gray[int(CAMERA_HEIGHT/2):, :]
+        
+        # Threshold to find white lines
+        _, thresh = cv2.threshold(roi, 200, 255, cv2.THRESH_BINARY)
+        
+        # Find center of white pixels
+        M = cv2.moments(thresh)
+        if M["m00"] > 0:
+            cx = int(M["m10"] / M["m00"])
+            return cx
+        
+        return None
+
+# ==============================================================================
+# 4. MAIN EXECUTION LOOP
+# ==============================================================================
 
 def main():
+    # Initialize Modules
     car = STM32Controller(SERIAL_PORT, BAUD_RATE)
-    traffic = TrafficManager()
-    lanes = LaneDetector()
-    
-    # Init Camera
-    cap = cv2.VideoCapture(0) # or GStreamer pipeline
-    cap.set(3, 640)
-    cap.set(4, 480)
+    brain = TrafficBrain()
+    eyes = PerceptionSystem()
+
+    # Initialize Camera (GStreamer for Pi 5)
+    pipeline = (
+        "libcamerasrc ! "
+        "video/x-raw, width=(int)640, height=(int)480, framerate=(fraction)30/1 ! "
+        "videoconvert ! "
+        "video/x-raw, format=(string)BGR ! appsink"
+    )
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+
+    if not cap.isOpened():
+        print("[ERROR] Could not open camera.")
+        return
+
+    print("---------------------------------------")
+    print(" SYSTEM READY. SHOW 'START' SIGNAL. ")
+    print("---------------------------------------")
 
     try:
         while True:
             ret, frame = cap.read()
-            if not ret: break
+            if not ret:
+                print("[ERROR] Camera frame dropped.")
+                break
+
+            # --- STEP 1: PERCEPTION ---
+            sign_label, sign_height = eyes.detect_signs(frame)
+            lane_center_x = eyes.detect_lane_center(frame)
+
+            # --- STEP 2: DECISION MAKING (SPEED) ---
+            target_speed, status_text = brain.process_rules(CAMERA_HEIGHT, sign_label, sign_height)
+
+            # --- STEP 3: CONTROL (STEERING) ---
+            steer_command = 0
             
-            # 1. TRAFFIC LOGIC (Speed Control)
-            # This function automatically decides the speed based on signs
-            target_speed, status_msg = traffic.check_rules(frame, SPEED_NORMAL)
+            # Only calculate steering if we are moving or about to move
+            if lane_center_x is not None:
+                # Calculate Error: How far is the lane from the center of the image?
+                error = lane_center_x - CENTER_IMAGE_X
+                
+                # P-Controller
+                steer_command = error * KP
             
-            # 2. LANE LOGIC (Steering Control)
-            steer_cmd = 0
-            if target_speed > 0: # Only steer if we are moving
-                lane_x = lanes.get_lane_center(frame)
-                if lane_x:
-                    error = lane_x - 320
-                    steer_cmd = 0.8 * error
+            # If stopped, force steering to zero to prevent servo jitter
+            if target_speed == 0:
+                steer_command = 0
+
+            # --- STEP 4: ACTUATION ---
+            car.send_command(target_speed, steer_command)
+
+            # --- VISUALIZATION (For Debugging) ---
+            # Draw Lane Center
+            if lane_center_x:
+                cv2.circle(frame, (lane_center_x, CAMERA_HEIGHT-50), 10, (255, 0, 0), -1)
             
-            # 3. EXECUTE
-            car.send(target_speed, steer_cmd)
+            # Draw Status Text
+            cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             
-            # Visuals
-            cv2.putText(frame, status_msg, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.imshow("BFMC AI", frame)
-            
-            if cv2.waitKey(1) == ord('q'): break
-            
+            # Draw Steering Bar
+            cv2.line(frame, (CENTER_IMAGE_X, CAMERA_HEIGHT-20), (CENTER_IMAGE_X + int(steer_command), CAMERA_HEIGHT-20), (0, 0, 255), 5)
+
+            cv2.imshow("BFMC Autonomous View", frame)
+
+            # Exit on 'q' key
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+    except KeyboardInterrupt:
+        print("\n[USER] Manual Interruption.")
+
     finally:
-        car.send(0,0) # Safety stop
+        print("[SYSTEM] Shutting down...")
+        car.emergency_stop()
         cap.release()
         cv2.destroyAllWindows()
 
