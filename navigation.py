@@ -1,164 +1,241 @@
-#!/usr/bin/env python3
+# ===================================== GENERAL IMPORTS ==================================
 
-import subprocess
-import numpy as np
-import socket
-import json
+import sys
 import time
-import cv2
-from ultralytics import YOLO
+import os
+import psutil
+import termios
+import tty
 
-# =========================
-# DEBUG / DISPLAY SETTINGS
-# =========================
-SHOW_VIDEO = True   # <-- SET False for headless / competition
+# Pin to CPU cores
+available_cores = list(range(psutil.cpu_count()))
+psutil.Process(os.getpid()).cpu_affinity(available_cores)
 
-# =========================
-# Camera configuration
-# =========================
-WIDTH = 640
-HEIGHT = 480
-YUV_FRAME_SIZE = WIDTH * HEIGHT * 3 // 2  # YUV420
+sys.path.append(".")
 
-# =========================
-# Gating parameters
-# =========================
-CONF_THRESHOLD = 0.7
-AREA_THRESHOLD = 8000
-STABLE_FRAMES = 3
-EVENT_COOLDOWN = 1.0  # seconds
+from multiprocessing import Queue, Event
+from src.utils.bigPrintMessages import BigPrint
+from src.utils.outputWriters import QueueWriter, MultiWriter
+from src.utils.messages.allMessages import Speed, Steering, StateChange
+import logging
 
-# =========================
-# Model & UDP
-# =========================
-MODEL_PATH = "/home/pi/Documents/models/best.pt"
-UDP_IP = "127.0.0.1"
-UDP_PORT = 5005
+logging.basicConfig(level=logging.INFO)
 
-model = YOLO(MODEL_PATH)
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+# ===================================== PROCESS IMPORTS ==================================
 
-# =========================
-# rpicam command (NEW OS)
-# =========================
-cmd = [
-    "rpicam-vid",
-    "-t", "0",
-    "--width", str(WIDTH),
-    "--height", str(HEIGHT),
-    "--codec", "yuv420",
-    "-o", "-",
-    "--nopreview"
-]
+from src.gateway.processGateway import processGateway
+from src.dashboard.processDashboard import processDashboard
+from src.hardware.camera.processCamera import processCamera
+from src.hardware.serialhandler.processSerialHandler import processSerialHandler
+from src.data.Semaphores.processSemaphores import processSemaphores
+from src.data.TrafficCommunication.processTrafficCommunication import processTrafficCommunication
+from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
+from src.statemachine.stateMachine import StateMachine
+from src.statemachine.systemMode import SystemMode
 
-proc = subprocess.Popen(
-    cmd,
-    stdout=subprocess.PIPE,
-    bufsize=YUV_FRAME_SIZE
-)
+# ===================================== KEYBOARD UTILS ==================================
 
-print("Vision service (RPiCam + YOLO + GATING + VIDEO) running...")
-
-# =========================
-# State variables
-# =========================
-stable_count = 0
-last_event_time = 0.0
-
-# =========================
-# Main loop
-# =========================
-while True:
+def get_key_nonblocking():
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
     try:
-        raw = proc.stdout.read(YUV_FRAME_SIZE)
-        if len(raw) != YUV_FRAME_SIZE:
-            continue
+        tty.setcbreak(fd)
+        if os.read(fd, 1):
+            return os.read(fd, 1).decode()
+    except:
+        return None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
-        # Convert YUV420 -> RGB
-        yuv = np.frombuffer(raw, dtype=np.uint8)
-        yuv = yuv.reshape((HEIGHT * 3 // 2, WIDTH))
-        frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB_I420)
+# ===================================== SHUTDOWN PROCESS ====================================
 
-        # -------------------------
-        # YOLO inference
-        # -------------------------
-        results = model(frame, conf=CONF_THRESHOLD, device="cpu", verbose=False)
+def shutdown_process(process, timeout=1):
+    process.join(timeout)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout)
+        if process.is_alive():
+            process.kill()
+    print(f"Process {process} stopped")
 
-        detected = False
-        best_event = None
+# ===================================== PROCESS MANAGEMENT ==================================
 
-        for r in results:
-            if r.boxes is None:
-                continue
+def manage_process_life(process_class, process_instance, process_args, enabled, allProcesses):
+    if enabled:
+        if process_instance is None:
+            process_instance = process_class(*process_args)
+            allProcesses.append(process_instance)
+            process_instance.start()
+    else:
+        if process_instance is not None and process_instance.is_alive():
+            shutdown_process(process_instance)
+            allProcesses.remove(process_instance)
+            process_instance = None
+    return process_instance
 
-            for box in r.boxes:
-                cls_id = int(box.cls[0])
-                conf = float(box.conf[0])
-                w = float(box.xywh[0][2])
-                h = float(box.xywh[0][3])
-                area = w * h
+# ======================================== SETUP ====================================
 
-                if conf >= CONF_THRESHOLD and area >= AREA_THRESHOLD:
-                    detected = True
-                    best_event = {
-                        "object": model.names[cls_id],
-                        "confidence": round(conf, 3),
-                        "bbox_area": int(area),
-                        "timestamp": time.time()
-                    }
+print(BigPrint.PLEASE_WAIT.value)
 
-                    # Optional bounding box overlay
-                    if SHOW_VIDEO:
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(
-                            frame,
-                            f"{model.names[cls_id]} {conf:.2f}",
-                            (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6,
-                            (0, 255, 0),
-                            2
-                        )
-                    break
+allProcesses = []
+allEvents = []
 
-        # -------------------------
-        # Stability gating
-        # -------------------------
-        if detected:
-            stable_count += 1
-        else:
-            stable_count = 0
+queueList = {
+    "Critical": Queue(),
+    "Warning": Queue(),
+    "General": Queue(),
+    "Config": Queue(),
+    "Log": Queue(),
+}
 
-        now = time.time()
-        if stable_count >= STABLE_FRAMES and best_event:
-            if now - last_event_time >= EVENT_COOLDOWN:
-                sock.sendto(
-                    json.dumps(best_event).encode(),
-                    (UDP_IP, UDP_PORT)
-                )
-                last_event_time = now
-                stable_count = 0
+logging = logging.getLogger()
 
-        # -------------------------
-        # OpenCV display (DEBUG)
-        # -------------------------
-        if SHOW_VIDEO:
-            cv2.imshow("Vision Debug Feed", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+# Redirect stdout/stderr to BFMC logger
+queue_writer = QueueWriter(queueList["Log"])
+sys.stdout = MultiWriter(sys.stdout, queue_writer)
+sys.stderr = MultiWriter(sys.stderr, queue_writer)
 
-    except KeyboardInterrupt:
-        print("\nStopping vision service...")
-        break
+# ===================================== INITIALIZE ==================================
 
-    except Exception as e:
-        print("Vision error:", e)
-        time.sleep(0.1)
+stateChangeSubscriber = messageHandlerSubscriber(queueList, StateChange, "lastOnly", True)
+StateMachine.initialize_shared_state(queueList)
 
-# =========================
-# Cleanup
-# =========================
-proc.terminate()
-sock.close()
-cv2.destroyAllWindows()
+processGateway = processGateway(queueList, logging)
+processGateway.start()
+
+# ===================================== INITIALIZE PROCESSES ==================================
+
+dashboard_ready = Event()
+camera_ready = Event()
+semaphore_ready = Event()
+traffic_com_ready = Event()
+serial_handler_ready = Event()
+
+processDashboard = processDashboard(queueList, logging, dashboard_ready, debugging=False)
+processCamera = processCamera(queueList, logging, camera_ready, debugging=False)
+processSemaphore = processSemaphores(queueList, logging, semaphore_ready, debugging=False)
+processTrafficCom = processTrafficCommunication(queueList, logging, 3, traffic_com_ready, debugging=False)
+processSerialHandler = processSerialHandler(queueList, logging, serial_handler_ready, dashboard_ready, debugging=False)
+
+allProcesses.extend([
+    processCamera,
+    processSemaphore,
+    processTrafficCom,
+    processSerialHandler,
+    processDashboard
+])
+
+allEvents.extend([
+    camera_ready,
+    semaphore_ready,
+    traffic_com_ready,
+    serial_handler_ready,
+    dashboard_ready
+])
+
+# ===================================== START PROCESSES ==================================
+
+for proc in allProcesses:
+    proc.daemon = True
+    proc.start()
+
+# ===================================== CONTROL STATE ==================================
+
+MANUAL_MODE = True
+current_speed = 0
+current_steer = 0
+
+print("[INFO] Keyboard control enabled")
+print("[INFO] W/S = speed | A/D = steer | SPACE = stop | M = toggle MANUAL/AUTO")
+
+# ===================================== MAIN LOOP ====================================
+
+blocker = Event()
+
+try:
+    for event in allEvents:
+        event.wait()
+
+    StateMachine.initialize_starting_mode()
+
+    print(BigPrint.C4_BOMB.value)
+    print(BigPrint.PRESS_CTRL_C.value)
+
+    while True:
+        # -------------------------------
+        # BFMC state handling
+        # -------------------------------
+        message = stateChangeSubscriber.receive()
+        if message is not None:
+            modeDictSemaphore = SystemMode[message].value["semaphore"]["process"]
+            modeDictTrafficCom = SystemMode[message].value["traffic_com"]["process"]
+
+            processSemaphore = manage_process_life(
+                processSemaphores,
+                processSemaphore,
+                [queueList, logging, semaphore_ready, False],
+                modeDictSemaphore["enabled"],
+                allProcesses
+            )
+
+            processTrafficCom = manage_process_life(
+                processTrafficCommunication,
+                processTrafficCom,
+                [queueList, logging, 3, traffic_com_ready, False],
+                modeDictTrafficCom["enabled"],
+                allProcesses
+            )
+
+        # -------------------------------
+        # Keyboard MANUAL control
+        # -------------------------------
+        key = get_key_nonblocking()
+
+        if key:
+            if key == 'm':
+                MANUAL_MODE = not MANUAL_MODE
+                print(f"[MODE] {'MANUAL' if MANUAL_MODE else 'AUTO'}")
+
+            if MANUAL_MODE:
+                if key == 'w':
+                    current_speed = 130
+                elif key == 's':
+                    current_speed = 0
+                elif key == 'a':
+                    current_steer = -20
+                elif key == 'd':
+                    current_steer = 20
+                elif key == 'x':
+                    current_steer = 0
+                elif key == ' ':
+                    current_speed = 0
+                    current_steer = 0
+
+                queueList["General"].put(Speed(current_speed))
+                queueList["General"].put(Steering(current_steer))
+
+        # -------------------------------
+        # AUTO MODE (integration point)
+        # -------------------------------
+        if not MANUAL_MODE:
+            # TODO:
+            # vision_event = shared state
+            # FSM decision
+            # queueList["General"].put(Speed(...))
+            # queueList["General"].put(Steering(...))
+            pass
+
+        blocker.wait(0.05)
+
+except KeyboardInterrupt:
+    print("\n[SHUTDOWN] KeyboardInterrupt detected")
+
+    for proc in reversed(allProcesses):
+        proc.stop()
+
+    processGateway.stop()
+
+    for proc in reversed(allProcesses):
+        shutdown_process(proc)
+
+    shutdown_process(processGateway)
