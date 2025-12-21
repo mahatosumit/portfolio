@@ -15,8 +15,11 @@ sys.path.append(".")
 
 from multiprocessing import Queue, Event
 from src.utils.bigPrintMessages import BigPrint
-from src.utils.outputWriters import QueueWriter, MultiWriter
-from src.utils.messages.allMessages import Speed, Steering, StateChange
+from src.utils.messages.allMessages import (
+    SpeedMotor,
+    SteerMotor,
+    StateChange
+)
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -35,17 +38,15 @@ from src.statemachine.systemMode import SystemMode
 
 # ===================================== KEYBOARD UTILS ==================================
 
-def get_key_nonblocking():
+def get_key():
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     try:
-        tty.setcbreak(fd)
-        if os.read(fd, 1):
-            return os.read(fd, 1).decode()
-    except:
-        return None
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return ch
 
 # ===================================== SHUTDOWN PROCESS ====================================
 
@@ -85,15 +86,9 @@ queueList = {
     "Warning": Queue(),
     "General": Queue(),
     "Config": Queue(),
-    "Log": Queue(),
 }
 
 logging = logging.getLogger()
-
-# Redirect stdout/stderr to BFMC logger
-queue_writer = QueueWriter(queueList["Log"])
-sys.stdout = MultiWriter(sys.stdout, queue_writer)
-sys.stderr = MultiWriter(sys.stderr, queue_writer)
 
 # ===================================== INITIALIZE ==================================
 
@@ -142,11 +137,11 @@ for proc in allProcesses:
 # ===================================== CONTROL STATE ==================================
 
 MANUAL_MODE = True
-current_speed = 0
-current_steer = 0
+current_speed = "0"
+current_steer = "0"
 
 print("[INFO] Keyboard control enabled")
-print("[INFO] W/S = speed | A/D = steer | SPACE = stop | M = toggle MANUAL/AUTO")
+print("[INFO] W/S = speed | A/D = steer | SPACE = stop | CTRL+C = exit")
 
 # ===================================== MAIN LOOP ====================================
 
@@ -162,9 +157,9 @@ try:
     print(BigPrint.PRESS_CTRL_C.value)
 
     while True:
-        # -------------------------------
+        # ----------------------------------
         # BFMC state handling
-        # -------------------------------
+        # ----------------------------------
         message = stateChangeSubscriber.receive()
         if message is not None:
             modeDictSemaphore = SystemMode[message].value["semaphore"]["process"]
@@ -186,44 +181,27 @@ try:
                 allProcesses
             )
 
-        # -------------------------------
-        # Keyboard MANUAL control
-        # -------------------------------
-        key = get_key_nonblocking()
+        # ----------------------------------
+        # MANUAL KEYBOARD CONTROL
+        # ----------------------------------
+        key = get_key()
 
-        if key:
-            if key == 'm':
-                MANUAL_MODE = not MANUAL_MODE
-                print(f"[MODE] {'MANUAL' if MANUAL_MODE else 'AUTO'}")
+        if key == 'w':
+            current_speed = "130"
+        elif key == 's':
+            current_speed = "0"
+        elif key == 'a':
+            current_steer = "-20"
+        elif key == 'd':
+            current_steer = "20"
+        elif key == 'x':
+            current_steer = "0"
+        elif key == ' ':
+            current_speed = "0"
+            current_steer = "0"
 
-            if MANUAL_MODE:
-                if key == 'w':
-                    current_speed = 130
-                elif key == 's':
-                    current_speed = 0
-                elif key == 'a':
-                    current_steer = -20
-                elif key == 'd':
-                    current_steer = 20
-                elif key == 'x':
-                    current_steer = 0
-                elif key == ' ':
-                    current_speed = 0
-                    current_steer = 0
-
-                queueList["General"].put(Speed(current_speed))
-                queueList["General"].put(Steering(current_steer))
-
-        # -------------------------------
-        # AUTO MODE (integration point)
-        # -------------------------------
-        if not MANUAL_MODE:
-            # TODO:
-            # vision_event = shared state
-            # FSM decision
-            # queueList["General"].put(Speed(...))
-            # queueList["General"].put(Steering(...))
-            pass
+        queueList["General"].put((SpeedMotor, current_speed))
+        queueList["General"].put((SteerMotor, current_steer))
 
         blocker.wait(0.05)
 
