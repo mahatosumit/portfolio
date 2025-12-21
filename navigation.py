@@ -1,152 +1,164 @@
-import cv2
+#!/usr/bin/env python3
+
+import subprocess
+import numpy as np
+import socket
+import json
 import time
-import sys
-import config  # Imports your settings
-
-# Ensure we can import from local folders
-sys.path.append('.')
-
-from drivers.camera import BFMCamera
-from drivers.motor import STM32Controller 
+import cv2
 from ultralytics import YOLO
 
-# ================= VISION SYSTEM =================
-class VisionSystem:
-    def __init__(self, model_path):
-        print(f"Loading AI Model from: {model_path}...")
-        try:
-            self.model = YOLO(model_path, task="detect")
-            print("✔ Model Loaded Successfully")
-        except Exception as e:
-            print(f"❌ Error loading model: {e}")
-            self.model = None
-        
-        self.class_map = {
-            0: "STOP", 1: "CROSSWALK", 2: "PRIORITY",
-            3: "PARKING", 4: "ROUNDABOUT", 5: "ONEWAY"
-        }
+# =========================
+# DEBUG / DISPLAY SETTINGS
+# =========================
+SHOW_VIDEO = True   # <-- SET False for headless / competition
 
-    def detect_sign(self, frame):
-        if self.model is None: return None
-        results = self.model(frame, imgsz=320, conf=0.4, verbose=False)
-        best_label = None
-        max_h = 0
-        for r in results:
-            for box in r.boxes:
-                h = int(box.xyxy[0][3] - box.xyxy[0][1])
-                if h > config.SIGN_TRIGGER_HEIGHT:
-                    label = self.class_map.get(int(box.cls[0]), "UNKNOWN")
-                    if h > max_h:
-                        max_h = h
-                        best_label = label
-        return best_label
+# =========================
+# Camera configuration
+# =========================
+WIDTH = 640
+HEIGHT = 480
+YUV_FRAME_SIZE = WIDTH * HEIGHT * 3 // 2  # YUV420
 
-    def detect_lane(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        height, width = gray.shape
-        roi = gray[int(height * 0.75):, :] 
-        _, thresh = cv2.threshold(roi, config.LANE_THRESHOLD, 255, cv2.THRESH_BINARY)
-        M = cv2.moments(thresh)
-        if M["m00"] > 0:
-            return int(M["m10"] / M["m00"]) 
-        return None
+# =========================
+# Gating parameters
+# =========================
+CONF_THRESHOLD = 0.7
+AREA_THRESHOLD = 8000
+STABLE_FRAMES = 3
+EVENT_COOLDOWN = 1.0  # seconds
 
-# ================= MAIN LOOP =================
-def main():
-    # 1. Hardware Init
-    car = STM32Controller(config.SERIAL_PORT, config.BAUD_RATE)
-    cam = BFMCamera()
-    cam.open()
-    
-    # 2. AI Init
-    vision = VisionSystem(config.MODEL_PATH)
-    
-    print("--- BFMC AUTONOMOUS PILOT ENGAGED ---")
+# =========================
+# Model & UDP
+# =========================
+MODEL_PATH = "/home/pi/Documents/models/best.pt"
+UDP_IP = "127.0.0.1"
+UDP_PORT = 5005
 
-    state = "DRIVING"
-    state_timer = 0
-    last_time = time.time()
-    
-    # Heartbeat Timer
-    last_heartbeat = time.time()
-    frame_count = 0
+model = YOLO(MODEL_PATH)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+# =========================
+# rpicam command (NEW OS)
+# =========================
+cmd = [
+    "rpicam-vid",
+    "-t", "0",
+    "--width", str(WIDTH),
+    "--height", str(HEIGHT),
+    "--codec", "yuv420",
+    "-o", "-",
+    "--nopreview"
+]
+
+proc = subprocess.Popen(
+    cmd,
+    stdout=subprocess.PIPE,
+    bufsize=YUV_FRAME_SIZE
+)
+
+print("Vision service (RPiCam + YOLO + GATING + VIDEO) running...")
+
+# =========================
+# State variables
+# =========================
+stable_count = 0
+last_event_time = 0.0
+
+# =========================
+# Main loop
+# =========================
+while True:
     try:
-        while True:
-            frame = cam.read()
-            if frame is None: continue
-            
-            frame_count += 1
-            height, width, _ = frame.shape
+        raw = proc.stdout.read(YUV_FRAME_SIZE)
+        if len(raw) != YUV_FRAME_SIZE:
+            continue
 
-            # --- 1. HEARTBEAT SAFETY (Crucial Fix) ---
-            # Send 'alive' signal every 1 second
-            if time.time() - last_heartbeat > 1.0:
-                car.send_heartbeat()
-                last_heartbeat = time.time()
-                # print("♥ Heartbeat Sent") 
+        # Convert YUV420 -> RGB
+        yuv = np.frombuffer(raw, dtype=np.uint8)
+        yuv = yuv.reshape((HEIGHT * 3 // 2, WIDTH))
+        frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB_I420)
 
-            # --- 2. PERCEPTION ---
-            sign = None
-            if frame_count % 3 == 0:
-                sign = vision.detect_sign(frame)
-                if sign: print(f"👀 SIGN SEEN: {sign}")
+        # -------------------------
+        # YOLO inference
+        # -------------------------
+        results = model(frame, conf=CONF_THRESHOLD, device="cpu", verbose=False)
 
-            # --- 3. DECISION ---
-            current_speed = config.SPEED_NORMAL
-            
-            if state == "DRIVING":
-                if sign == "STOP":
-                    state = "STOPPING"
-                    state_timer = time.time()
-                    print("🛑 STOPPING")
-                elif sign == "CROSSWALK" or sign == "ROUNDABOUT":
-                    current_speed = config.SPEED_CAUTION
-            
-            elif state == "STOPPING":
-                current_speed = 0
-                if time.time() - state_timer > config.STOP_WAIT_TIME:
-                    state = "COOLDOWN"
-                    state_timer = time.time()
-                    print("✅ RESUMING")
-            
-            elif state == "COOLDOWN":
-                current_speed = config.SPEED_NORMAL
-                if time.time() - state_timer > config.INTERSECTION_COOLDOWN:
-                    state = "DRIVING"
+        detected = False
+        best_event = None
 
-            # --- 4. CONTROL ---
-            lane_x = vision.detect_lane(frame)
-            steer_cmd = 0
-            
-            if lane_x is not None:
-                error = (lane_x - (width // 2)) / (width // 2)
-                steer_cmd = config.KP * error * config.MAX_STEER
-                if abs(steer_cmd) < config.STEER_DEADZONE: steer_cmd = 0
-                cv2.circle(frame, (lane_x, height-50), 10, (0, 255, 0), -1)
+        for r in results:
+            if r.boxes is None:
+                continue
 
-            # Debug: Force print speed command to terminal to verify
-            # print(f"CMD -> Speed: {current_speed}, Steer: {int(steer_cmd)}")
+            for box in r.boxes:
+                cls_id = int(box.cls[0])
+                conf = float(box.conf[0])
+                w = float(box.xywh[0][2])
+                h = float(box.xywh[0][3])
+                area = w * h
 
-            car.send(current_speed, steer_cmd)
+                if conf >= CONF_THRESHOLD and area >= AREA_THRESHOLD:
+                    detected = True
+                    best_event = {
+                        "object": model.names[cls_id],
+                        "confidence": round(conf, 3),
+                        "bbox_area": int(area),
+                        "timestamp": time.time()
+                    }
 
-            # --- 5. DISPLAY ---
-            cv2.putText(frame, f"STATE: {state}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.imshow("BFMC Pilot", frame)
-            
-            if cv2.waitKey(1) == 27: break
-            
-            elapsed = time.time() - last_time
-            if elapsed < config.CONTROL_DT:
-                time.sleep(config.CONTROL_DT - elapsed)
-            last_time = time.time()
+                    # Optional bounding box overlay
+                    if SHOW_VIDEO:
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(
+                            frame,
+                            f"{model.names[cls_id]} {conf:.2f}",
+                            (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            (0, 255, 0),
+                            2
+                        )
+                    break
+
+        # -------------------------
+        # Stability gating
+        # -------------------------
+        if detected:
+            stable_count += 1
+        else:
+            stable_count = 0
+
+        now = time.time()
+        if stable_count >= STABLE_FRAMES and best_event:
+            if now - last_event_time >= EVENT_COOLDOWN:
+                sock.sendto(
+                    json.dumps(best_event).encode(),
+                    (UDP_IP, UDP_PORT)
+                )
+                last_event_time = now
+                stable_count = 0
+
+        # -------------------------
+        # OpenCV display (DEBUG)
+        # -------------------------
+        if SHOW_VIDEO:
+            cv2.imshow("Vision Debug Feed", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
 
     except KeyboardInterrupt:
-        print("\nStopping...")
-    finally:
-        car.stop()
-        cam.release()
-        cv2.destroyAllWindows()
+        print("\nStopping vision service...")
+        break
 
-if __name__ == "__main__":
-    main()
+    except Exception as e:
+        print("Vision error:", e)
+        time.sleep(0.1)
+
+# =========================
+# Cleanup
+# =========================
+proc.terminate()
+sock.close()
+cv2.destroyAllWindows()
