@@ -1,93 +1,132 @@
-import cv2
-import numpy as np
+from Brain.orchestrator import Orchestrator
+from Brain.planner import plan_action
+from Brain.safety import safety_filter
+from Brain.vision_fast import detect_hazards
+from Brain.camera import capture_frame
+from Brain.voice import VoiceEngine
+from Brain.voice_input import VoiceInput
+from Brain.online_ai import ask_gemini, suggest_intent
+from Brain.actions import Action
 
-def nothing(x):
-    pass
+# ---------------- INIT ----------------
+orchestrator = Orchestrator(mode="personal_care")
+voice = VoiceEngine()
 
-# Initialize Camera
-cap = cv2.VideoCapture(0) # Change to 0 or 1 depending on your camera index
+last_spoken = None
+last_ai_reply = None
+latest_user_command = None
 
-# Create a Window for Trackbars
-cv2.namedWindow("Tuning")
-cv2.createTrackbar("Top Width", "Tuning", 100, 320, nothing)    # Top spread
-cv2.createTrackbar("Bottom Width", "Tuning", 300, 320, nothing) # Bottom spread
-cv2.createTrackbar("Height Top", "Tuning", 240, 480, nothing)   # How far up to look
-cv2.createTrackbar("Height Bottom", "Tuning", 480, 480, nothing)# How close to look
-cv2.createTrackbar("Threshold", "Tuning", 150, 255, nothing)    # Binary cutoff
+# Wake-word state
+awake = False
+WAKE_WORD = "hey zuno"
 
+# Short-term conversation memory
+conversation_memory = []
+MAX_MEMORY = 5
+
+print("ZunoBot Brain Running (Vision + Voice + Gemini)\n")
+
+# ----------- VOICE INPUT CALLBACK -----------
+
+def on_voice_text(text: str):
+    global latest_user_command, awake
+
+    text = text.lower().strip()
+    print("Heard:", text)
+
+    # Wake-word detection
+    if WAKE_WORD in text:
+        awake = True
+        voice.speak("Yes, I am listening.")
+        return
+
+    # Only accept commands after wake-word
+    if awake:
+        latest_user_command = text
+
+
+voice_input = VoiceInput(
+    model_path="/home/pi/zunobot/models/vosk-model-small-en-us-0.15"
+)
+voice_input.on_text = on_voice_text
+voice_input.start()
+
+# ---------------- MAIN LOOP ----------------
 while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-    
-    # Resize for consistency (optional, helps with FPS)
-    frame = cv2.resize(frame, (640, 480))
-    h, w = frame.shape[:2]
+    # 1?? FAST VISION (always running)
+    frame = capture_frame()
+    if frame is None:
+        continue
 
-    # 1. Get Values from Trackbars
-    w_top = cv2.getTrackbarPos("Top Width", "Tuning")
-    w_bot = cv2.getTrackbarPos("Bottom Width", "Tuning")
-    h_top = cv2.getTrackbarPos("Height Top", "Tuning")
-    h_bot = cv2.getTrackbarPos("Height Bottom", "Tuning")
-    thresh_val = cv2.getTrackbarPos("Threshold", "Tuning")
+    hazards = detect_hazards(frame)
 
-    # 2. Define Source Points (The Trapezoid)
-    # We assume the camera is centered, so we calculate offsets from the center (w // 2)
-    center_x = w // 2
-    
-    # Top Left, Top Right, Bottom Left, Bottom Right
-    tl = (center_x - w_top, h_top)
-    tr = (center_x + w_top, h_top)
-    bl = (center_x - w_bot, h_bot)
-    br = (center_x + w_bot, h_bot)
-    
-    src_points = np.float32([tl, tr, bl, br])
+    perception = {
+        "person": hazards.get("person", False),
+        "obstacle": hazards.get("obstacle", False),
+        "emergency": False
+    }
 
-    # 3. Define Destination Points (The Square/Rectangle output)
-    # We want the output to be a 400x400 top-down view
-    dst_size = 400
-    dst_points = np.float32([
-        [0, 0],           # Top Left
-        [dst_size, 0],    # Top Right
-        [0, dst_size],    # Bottom Left
-        [dst_size, dst_size] # Bottom Right
-    ])
+    # 2?? USER INTENT FROM VOICE (after wake-word)
+    user_action = None
+    ai_action = None
+    user_text = None
 
-    # 4. Compute Perspective Transform
-    matrix = cv2.getPerspectiveTransform(src_points, dst_points)
-    warped = cv2.warpPerspective(frame, matrix, (dst_size, dst_size))
+    if latest_user_command:
+        user_text = latest_user_command
+        latest_user_command = None
+        awake = False  # reset wake state after one command
 
-    # 5. Apply Thresholding (To see if lines are clear)
-    gray_warped = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-    # If black tape on white floor, use cv2.THRESH_BINARY_INV
-    # If white tape on black floor, use cv2.THRESH_BINARY
-    _, binary = cv2.threshold(gray_warped, thresh_val, 255, cv2.THRESH_BINARY_INV)
+        # ---- Conversation memory (user side) ----
+        conversation_memory.append(f"User: {user_text}")
+        conversation_memory = conversation_memory[-MAX_MEMORY:]
 
-    # Visualization: Draw the points on the original frame so you can see them
-    cv2.circle(frame, tl, 5, (0, 0, 255), -1) # Red dots
-    cv2.circle(frame, tr, 5, (0, 0, 255), -1)
-    cv2.circle(frame, bl, 5, (0, 0, 255), -1)
-    cv2.circle(frame, br, 5, (0, 0, 255), -1)
-    cv2.line(frame, tl, tr, (0, 255, 0), 2)   # Green box
-    cv2.line(frame, tr, br, (0, 255, 0), 2)
-    cv2.line(frame, br, bl, (0, 255, 0), 2)
-    cv2.line(frame, bl, tl, (0, 255, 0), 2)
+        # ---- Gemini intent suggestion (non-binding) ----
+        try:
+            intent_text = suggest_intent(user_text)
+            ai_action = Action[intent_text]
+        except Exception:
+            ai_action = None
 
-    # Show windows
-    cv2.imshow("Original with ROI", frame)
-    cv2.imshow("Bird's Eye View (Warped)", binary)
+        # ---- Deterministic planner ----
+        user_action = plan_action(user_text)
 
-    key = cv2.waitKey(1)
-    if key == ord('q'):
-        break
-    elif key == ord('s'):
-        print("\n--- SAVE THESE NUMBERS ---")
-        print(f"Top Width: {w_top}")
-        print(f"Bottom Width: {w_bot}")
-        print(f"Height Top: {h_top}")
-        print(f"Height Bottom: {h_bot}")
-        print(f"Threshold: {thresh_val}")
-        print("--------------------------\n")
+    # 3?? ORCHESTRATOR (final motion decision)
+    final_action, explanation = orchestrator.decide(
+        perception,
+        user_action=user_action,
+        ai_action=ai_action
+    )
 
-cap.release()
-cv2.destroyAllWindows()
+    final_action = safety_filter(final_action)
+
+    print("ACTION:", final_action.value)
+
+    # 4?? CARE VOICE (deterministic explanation)
+    if explanation and explanation != last_spoken:
+        voice.speak(explanation)
+        print("ZunoBot:", explanation)
+        last_spoken = explanation
+
+    # 5?? GEMINI (only for explanation / vision / help)
+    if user_text and any(
+        k in user_text
+        for k in ["see", "why", "explain", "help", "what"]
+    ):
+        print("[Gemini] Thinking...")
+
+        context = "\n".join(conversation_memory)
+
+        ai_text = ask_gemini(
+            frame,
+            f"{context}\nUser: {user_text}",
+            perception
+        )
+
+        if ai_text and ai_text != last_ai_reply:
+            voice.speak(ai_text)
+            print("ZunoBot (Gemini):", ai_text)
+            last_ai_reply = ai_text
+
+            # ---- Conversation memory (bot side) ----
+            conversation_memory.append(f"ZunoBot: {ai_text}")
+            conversation_memory = conversation_memory[-MAX_MEMORY:]
