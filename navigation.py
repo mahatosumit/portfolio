@@ -1,152 +1,135 @@
+import serial
 import time
+import threading
+import math
 
-from Brain.orchestrator import Orchestrator
-from Brain.planner import plan_action
-from Brain.safety import safety_filter
-from Brain.vision_fast import detect_hazards
-from Brain.camera import capture_frame
-from Brain.voice import VoiceEngine
-from Brain.voice_input import VoiceInput
-from Brain.online_ai import ask_gemini, suggest_intent
-from Brain.actions import Action
+# =====================================================
+# 1. CONFIGURATION
+# =====================================================
+SERIAL_PORT = "/dev/ttyACM0"  # Check: might be /dev/ttyUSB0
+BAUD_RATE = 115200
 
+# Limits
+MAX_SPEED = 15.0   # Start slow for testing (0-100 scale)
+MAX_STEER = 25.0   # Degrees
 
-# ================= INIT =================
-orchestrator = Orchestrator(mode="personal_care")
-voice = VoiceEngine()
+# =====================================================
+# 2. GLOBAL STATE (Shared between threads)
+# =====================================================
+# These are the "Brain's" current decisions.
+# The background thread will send whatever is in here.
+current_speed = 0.0
+current_steer = 0.0
+system_running = True
 
-print("ZunoBot Brain Running (Vision + Voice + Gemini)\n")
+# =====================================================
+# 3. BACKGROUND WORKER (The "Heartbeat")
+# =====================================================
+def serial_worker():
+    """
+    This thread runs in the background. 
+    It wakes up every 50ms (20Hz) and sends the current command.
+    This satisfies the STM32's 200ms watchdog.
+    """
+    global system_running
+    
+    try:
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+        time.sleep(2) # Allow STM32 to reset
+        print(f"✅ Connected to {SERIAL_PORT}")
+        
+        while system_running:
+            # Format: #S:15.5;;#T:-20.0;;
+            # Note: We send both every time to keep the state robust
+            cmd = f"#S:{current_speed:.2f};;#T:{current_steer:.2f};;\r\n"
+            
+            ser.write(cmd.encode('utf-8'))
+            
+            # Print occasionally for debugging (every 20th packet)
+            # print(f"Sent: {cmd.strip()}") 
+            
+            time.sleep(0.05) # 50ms wait = 20Hz update rate
+            
+        # Clean exit
+        ser.write(b"#S:0;;#T:0;;\r\n")
+        ser.close()
+        print("🔌 Serial closed.")
+        
+    except Exception as e:
+        print(f"❌ SERIAL ERROR: {e}")
+        system_running = False
 
-# ---------- STATES ----------
-latest_user_command = None
-awake = False
-WAKE_WORD = "hey zuno"
+# =====================================================
+# 4. MAIN TEST SEQUENCE
+# =====================================================
+def main():
+    global current_speed, current_steer, system_running
+    
+    # Start the heartbeat thread
+    t = threading.Thread(target=serial_worker)
+    t.start()
+    
+    print("🚗 TEST STARTED: Watchdog is being fed in background.")
+    time.sleep(1)
 
-last_action = None
-last_spoken = None
-last_ai_reply = None
+    try:
+        # --- TEST 1: STEERING SWEEP ---
+        print("\n[1/4] Testing Steering (Check range of motion)")
+        print("   -> Center")
+        current_steer = 0.0
+        time.sleep(1)
+        
+        print("   -> Right 20 deg")
+        current_steer = 20.0
+        time.sleep(1)
+        
+        print("   -> Left 20 deg")
+        current_steer = -20.0
+        time.sleep(1)
+        
+        print("   -> Center")
+        current_steer = 0.0
+        time.sleep(1)
 
-# Perception throttling
-LAST_VISION_TIME = 0
-VISION_INTERVAL = 2.5  # seconds
+        # --- TEST 2: COSINE SMOOTHNESS CHECK ---
+        # This simulates your lane-keep algorithm output
+        print("\n[2/4] Testing Smoothness (Sine Wave Steering)")
+        for i in range(0, 360, 5):
+            rad = math.radians(i)
+            current_steer = math.sin(rad) * 20.0 # Swing +/- 20 deg
+            time.sleep(0.05)
+        current_steer = 0.0
 
-# Brain loop throttling
-LOOP_DELAY = 0.15  # seconds (VERY IMPORTANT)
+        # --- TEST 3: MOTOR GENTLE MOVE ---
+        print("\n[3/4] Testing Motor (Low Speed)")
+        print("   -> Forward 15%")
+        current_speed = MAX_SPEED
+        time.sleep(2)
+        
+        print("   -> Stop")
+        current_speed = 0.0
+        time.sleep(1)
 
-# Conversation memory
-conversation_memory = []
-MAX_MEMORY = 5
+        # --- TEST 4: WATCHDOG SAFETY CHECK ---
+        print("\n[4/4] Testing Safety Watchdog")
+        print("   -> Motor running...")
+        current_speed = MAX_SPEED
+        time.sleep(1)
+        
+        print("   -> SIMULATING CRASH (Stopping Python Thread)")
+        # We purposely stop the background thread to see if STM32 stops the car
+        system_running = False 
+        t.join() # Wait for thread to die
+        
+        print("   -> Thread stopped. STM32 should have auto-braked by now.")
+        print("   -> (If wheels are still spinning, the Watchdog failed!)")
 
+    except KeyboardInterrupt:
+        print("\n🛑 INTERRUPTED! Stopping...")
+        current_speed = 0
+        current_steer = 0
+        system_running = False
+        t.join()
 
-# ========== VOICE CALLBACK ==========
-def on_voice_text(text: str):
-    global latest_user_command, awake
-
-    text = text.lower().strip()
-    print("Heard:", text)
-
-    if WAKE_WORD in text:
-        awake = True
-        voice.speak("Yes, I am listening.")
-        return
-
-    if awake:
-        latest_user_command = text
-        awake = False
-
-
-voice_input = VoiceInput(
-    model_path="/home/pi/zunobot/models/vosk-model-small-en-us-0.15"
-)
-voice_input.on_text = on_voice_text
-voice_input.start()
-
-
-# ================= MAIN LOOP =================
-while True:
-    now = time.time()
-
-    # ---------- 1. FRAME ACQUIRE (NON-BLOCKING) ----------
-    frame = capture_frame()
-    if frame is None:
-        time.sleep(LOOP_DELAY)
-        continue
-
-    # ---------- 2. VISION (TIME-GATED) ----------
-    if now - LAST_VISION_TIME >= VISION_INTERVAL:
-        hazards = detect_hazards(frame)
-        LAST_VISION_TIME = now
-    else:
-        hazards = {}  # do not re-run perception
-
-    perception = {
-        "person": hazards.get("person", False),
-        "obstacle": hazards.get("obstacle", False),
-        "emergency": False
-    }
-
-    # ---------- 3. USER INTENT ----------
-    user_action = None
-    ai_action = None
-    user_text = None
-
-    if latest_user_command:
-        user_text = latest_user_command
-        latest_user_command = None
-
-        conversation_memory.append(f"User: {user_text}")
-        conversation_memory = conversation_memory[-MAX_MEMORY:]
-
-        # AI intent hint (optional)
-        try:
-            intent = suggest_intent(user_text)
-            ai_action = Action[intent]
-        except Exception:
-            ai_action = None
-
-        user_action = plan_action(user_text)
-
-    # ---------- 4. ORCHESTRATOR ----------
-    final_action, explanation = orchestrator.decide(
-        perception,
-        user_action=user_action,
-        ai_action=ai_action
-    )
-
-    final_action = safety_filter(final_action)
-
-    # ---------- 5. ACTION CHANGE ONLY ----------
-    if final_action != last_action:
-        print("ACTION:", final_action.value)
-        last_action = final_action
-
-        if explanation:
-            voice.speak(explanation)
-            print("ZunoBot:", explanation)
-            last_spoken = explanation
-
-    # ---------- 6. GEMINI (ONLY IF ASKED) ----------
-    if user_text and any(
-        k in user_text
-        for k in ["see", "why", "explain", "help", "what"]
-    ):
-        print("[Gemini] Thinking...")
-
-        context = "\n".join(conversation_memory)
-
-        ai_text = ask_gemini(
-            frame,
-            f"{context}\nUser: {user_text}",
-            perception
-        )
-
-        if ai_text and ai_text != last_ai_reply:
-            voice.speak(ai_text)
-            print("ZunoBot (Gemini):", ai_text)
-
-            conversation_memory.append(f"ZunoBot: {ai_text}")
-            conversation_memory = conversation_memory[-MAX_MEMORY:]
-            last_ai_reply = ai_text
-
-    # ---------- 7. LOOP THROTTLE ----------
-    time.sleep(LOOP_DELAY)
+if __name__ == "__main__":
+    main()
