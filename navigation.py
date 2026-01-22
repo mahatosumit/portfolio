@@ -1,91 +1,85 @@
-import serial
+from enum import Enum
 import time
-import threading
 
-class SerialHandler:
-    def __init__(self, port="/dev/ttyACM0", baud=115200):
-        self.port = port
-        self.baud = baud
-        self.ser = None
-        self.running = False
-        self.thread = None
-        
-        # Shared State Variables (Thread-Safe)
-        self.current_speed = 0.0
-        self.current_steer = 0.0
-        self.lock = threading.Lock()
 
-    def connect(self):
-        try:
-            self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
-            time.sleep(2.0)  # Wait for STM32 reset
-            print(f"[Serial] Connected to {self.port}")
-            
-            # Start the background heartbeat thread
-            self.running = True
-            self.thread = threading.Thread(target=self._worker, daemon=True)
-            self.thread.start()
-            
-        except Exception as e:
-            print(f"[Serial] Connection Error: {e}")
-            self.running = False
+class State(Enum):
+    INIT = 0
+    LANE_FOLLOW = 1
+    CAUTION = 2
+    BLIND = 3
+    OBSTACLE = 4
+    STOP = 5
 
-    def _worker(self):
-        """
-        Background Loop: 
-        Sends the latest speed/steer command every 50ms (20Hz).
-        This keeps the STM32 Watchdog happy!
-        """
-        while self.running:
-            if self.ser and self.ser.is_open:
-                try:
-                    # 1. Read the latest decisions from Main Thread
-                    with self.lock:
-                        speed = self.current_speed
-                        steer = self.current_steer
-                    
-                    # 2. Format & Send Packet
-                    # Format: #S:15.0;;#T:-5.0;;
-                    cmd = f"#S:{speed:.2f};;#T:{steer:.2f};;\r\n"
-                    self.ser.write(cmd.encode())
-                    
-                except Exception as e:
-                    print(f"[Serial] Write Error: {e}")
-            
-            # 3. Wait 50ms (20Hz)
-            time.sleep(0.05)
 
-    def send_command(self, speed, steer):
-        """
-        Main thread calls this to UPDATE decisions.
-        It is NON-BLOCKING (instant).
-        """
-        # Safety Clamping
-        speed = max(-100.0, min(speed, 100.0))
-        steer = max(-25.0, min(steer, 25.0))
-        
-        # Update shared variables
-        with self.lock:
-            self.current_speed = speed
-            self.current_steer = steer
+class FSM:
+    def __init__(self):
+        self.state = State.INIT
+        self.state_enter_time = time.time()
 
-    def enable_ignition(self):
-        """Helper to send the KL15 command once"""
-        if self.ser and self.ser.is_open:
-            self.ser.write(b"#kl:1;;\r\n")
+        # ==================================================
+        # Phase-2 note:
+        # Sign handling is architecturally present
+        # but NOT behaviorally active in Phase-2
+        # ==================================================
+        self.sign_memory = 0.0
+        self.ignore_stop_sign_until = 0.0
 
-    def stop(self):
-        self.running = False
-        # Stop the car before closing
-        self.send_command(0, 0)
-        time.sleep(0.1)
-        
-        if self.thread:
-            self.thread.join(timeout=1.0)
-            
-        if self.ser:
-            try:
-                self.ser.close()
-            except:
-                pass
-        print("[Serial] Disconnected")
+    # --------------------------------------------------
+    def transition(self, new_state: State):
+        if new_state != self.state:
+            self.state = new_state
+            self.state_enter_time = time.time()
+            print(f"[FSM] -> {self.state.name}")
+
+    # --------------------------------------------------
+    def update(self, signals: dict) -> State:
+        now = time.time()
+        elapsed = now - self.state_enter_time
+
+        lane_conf = signals.get("lane_confidence", 0.0)
+        obstacle = signals.get("obstacle", False)
+
+        # ================= INIT =================
+        # Phase-2: INIT must NEVER block autonomy
+        # Immediately enter lane-following
+        if self.state == State.INIT:
+            self.transition(State.LANE_FOLLOW)
+
+        # ================= LANE FOLLOW =================
+        elif self.state == State.LANE_FOLLOW:
+            if obstacle:
+                self.transition(State.OBSTACLE)
+            elif lane_conf == 0.0:
+                self.transition(State.BLIND)
+            elif lane_conf < 0.6:
+                self.transition(State.CAUTION)
+
+        # ================= CAUTION =================
+        elif self.state == State.CAUTION:
+            if obstacle:
+                self.transition(State.OBSTACLE)
+            elif lane_conf == 0.0:
+                self.transition(State.BLIND)
+            elif lane_conf > 0.8:
+                self.transition(State.LANE_FOLLOW)
+
+        # ================= BLIND =================
+        elif self.state == State.BLIND:
+            if lane_conf > 0.6:
+                self.transition(State.CAUTION)
+            elif elapsed > 2.0:
+                print("[FSM] SAFETY STOP: Lane lost too long")
+                self.transition(State.STOP)
+
+        # ================= OBSTACLE =================
+        elif self.state == State.OBSTACLE:
+            if not obstacle and elapsed > 0.5:
+                self.transition(State.CAUTION)
+
+        # ================= STOP =================
+        elif self.state == State.STOP:
+            # Phase-2: basic safety stop only
+            if elapsed > 3.0:
+                self.transition(State.CAUTION)
+
+        return self.state
