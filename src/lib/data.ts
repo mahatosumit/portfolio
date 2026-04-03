@@ -60,7 +60,7 @@ export const EXPERIENCE = [
   {
     org: 'Bosch',
     role: 'RAG Intern',
-    period: 'Feb – Apr 2024',
+    period: 'Internship',
     problem: 'Unstructured data limiting AI usability',
     system: 'Retrieval-Augmented Generation pipeline for structured knowledge access from enterprise data.',
     impact: 'Efficient querying + improved AI response relevance across internal knowledge bases.',
