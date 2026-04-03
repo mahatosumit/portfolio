@@ -22,18 +22,32 @@ export default function Optinx() {
             <h2 className="font-syne text-5xl md:text-6xl font-extrabold text-cyan tracking-[-0.03em] mb-6">
               OPTINX
             </h2>
-            <p className="text-text-mid font-dm font-light text-[15px] leading-relaxed mb-8 max-w-md">
-              An AI and automation company building intelligent systems for real-world environments — across mobility, agriculture, and robotics.
-            </p>
-            <a
-              href={PROFILE.optinx}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 font-mono text-[12px] text-cyan border-b border-cyan/30 pb-[2px] hover:border-cyan transition-colors duration-200"
-            >
-              optinx.space
-              <ArrowUpRight size={13} />
-            </a>
+            <div className="flex flex-col gap-6">
+              <p className="text-text-mid font-dm font-light text-[15px] leading-relaxed max-w-md">
+                An AI and automation company building intelligent systems for real-world environments — across mobility, agriculture, and robotics.
+              </p>
+              
+              <div className="flex items-center gap-6">
+                <a
+                  href={PROFILE.optinx}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-syne text-[11px] font-bold tracking-[0.2em] uppercase px-8 py-3 bg-cyan text-bg hover:bg-white transition-all duration-300 rounded-sm"
+                >
+                  Visit Website
+                </a>
+                
+                <a
+                  href={PROFILE.optinx}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="group flex items-center gap-2 font-mono text-[11px] text-text-dim hover:text-cyan transition-colors duration-200"
+                >
+                  <span>{PROFILE.optinx.replace('https://', '').replace('/', '')}</span>
+                  <ArrowUpRight size={14} className="group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform duration-300" />
+                </a>
+              </div>
+            </div>
           </div>
 
           {/* Right — pillars */}

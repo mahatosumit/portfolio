@@ -27,8 +27,16 @@ export default function Nav() {
     >
       <div className="max-w-7xl mx-auto px-6 md:px-12 h-16 flex items-center justify-between">
         {/* Logo */}
-        <div className="font-mono text-xs text-cyan tracking-[0.2em] uppercase">
-          SM <span className="text-white/20 mx-1">{'//'}</span> Systems Engineer
+        <div className="flex items-center gap-3">
+          <div className="font-syne text-sm md:text-base font-bold text-cyan tracking-[0.15em] uppercase">
+            SUMIT MAHATO
+          </div>
+          <div className="hidden sm:flex items-center gap-3">
+            <span className="text-white/10 h-4 w-[1px] bg-white/10" />
+            <span className="font-syne text-sm md:text-base font-bold text-cyan tracking-[0.15em] uppercase">
+              Systems Engineer
+            </span>
+          </div>
         </div>
 
         {/* Links */}
@@ -37,7 +45,7 @@ export default function Nav() {
             <li key={l.href}>
               <a
                 href={l.href}
-                className="font-mono text-[11px] text-text-dim hover:text-cyan tracking-[0.12em] uppercase transition-colors duration-200"
+                className="font-syne text-[12px] md:text-[13px] text-text-dim hover:text-cyan tracking-[0.15em] uppercase transition-all duration-300 hover:tracking-[0.2em]"
               >
                 {l.label}
               </a>
@@ -48,7 +56,7 @@ export default function Nav() {
         {/* CTA */}
         <a
           href="mailto:sumitmahato0913@gmail.com"
-          className="hidden md:block font-syne text-xs font-bold tracking-widest uppercase px-5 py-2 border border-cyan/30 text-cyan hover:bg-cyan hover:text-black transition-all duration-200"
+          className="hidden md:block font-syne text-[11px] font-bold tracking-[0.2em] uppercase px-6 py-2.5 border border-cyan/20 text-cyan hover:bg-cyan hover:text-bg hover:border-cyan transition-all duration-300 rounded-sm"
         >
           Contact
         </a>
