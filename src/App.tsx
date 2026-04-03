@@ -7,7 +7,7 @@ import { ServicesSection } from './components/ServicesSection';
 import { ProjectsSection } from './components/ProjectsSection';
 import { LeadershipSection } from './components/LeadershipSection';
 import { ContactSection } from './components/ContactSection';
-import { Footer } from './components/Footer';
+import Footer from './components/Footer';
 
 export default function App() {
   useEffect(() => {

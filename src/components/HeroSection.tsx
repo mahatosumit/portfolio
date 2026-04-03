@@ -1,4 +1,4 @@
-import { motion } from 'motion/react';
+import { motion } from 'framer-motion';
 import { Github, Linkedin, Globe, ChevronDown } from 'lucide-react';
 import { Button } from './ui/button';
 import heroImage from 'figma:asset/0880421087ec693b7c4eb12ae59cd905e6a0bd5d.png';
@@ -18,7 +18,7 @@ export function HeroSection() {
         {/* Left Content */}
         <div className="space-y-6">
           <h1 className="text-5xl lg:text-7xl font-bold leading-tight">
-            Hi, I'm{' '}
+            Hi, I&apos;m{" "}
             <span className="text-primary">Sumit Mahato</span>
           </h1>
           
@@ -56,17 +56,18 @@ export function HeroSection() {
         </div>
 
         {/* Right Content - Profile Image */}
-       <div className="flex justify-center lg:justify-end">
-  <div style={{ maxWidth: '400px', maxHeight: '400px' }}>
-    <div className="hexagon-inner">
-      <img
-        src={heroImage}
-        alt="Sumit Kumar Mahato"
-{/*         className="hexagon-img" // Uncomment if styling is needed */}
-      />
-    </div>
-  </div>
-</div>
+        <div className="flex justify-center lg:justify-end">
+          <div style={{ maxWidth: '400px', maxHeight: '400px' }}>
+            <div className="hexagon-inner">
+              <img
+                src={heroImage.src}
+                alt="Sumit Kumar Mahato"
+                className="hexagon-img"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Scroll Indicator */}
       <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2">

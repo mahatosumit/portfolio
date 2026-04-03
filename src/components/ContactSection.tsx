@@ -1,4 +1,4 @@
-import { motion } from "motion/react";
+import { motion } from "framer-motion";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -60,7 +60,7 @@ export function ContactSection() {
           <div className="w-24 h-1 bg-primary mx-auto mb-8"></div>
           <p className="text-xl text-muted-foreground max-w-3xl mx-auto">
             Ready to collaborate on your next innovative
-            project? Let's build something amazing together.
+            project? Let&apos;s build something amazing together.
           </p>
         </motion.div>
 
@@ -75,14 +75,14 @@ export function ContactSection() {
           >
             <div>
               <h3 className="text-2xl font-bold mb-6">
-                Let's Start a Conversation
+                Let&apos;s Start a Conversation
               </h3>
               <p className="text-muted-foreground leading-relaxed mb-8">
-                I'm always excited to discuss new opportunities,
+                I&apos;m always excited to discuss new opportunities,
                 innovative projects, and ways we can leverage
                 technology to solve real-world problems. Whether
-                you're looking for AI solutions, robotics
-                development, or web applications, I'd love to
+                you&apos;re looking for AI solutions, robotics
+                development, or web applications, I&apos;d love to
                 hear from you.
               </p>
             </div>

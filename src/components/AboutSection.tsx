@@ -1,4 +1,4 @@
-import { motion } from "motion/react";
+import { motion } from "framer-motion";
 import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
 
@@ -35,18 +35,18 @@ export function AboutSection() {
           >
             <Card className="p-8 bg-card/50 backdrop-blur-sm border-border hover:border-primary transition-all duration-300">
               <p className="text-lg leading-relaxed mb-6">
-                I'm pursuing{" "}
+                I&apos;m pursuing{" "}
                 <span className="text-primary font-semibold">
                   B.E. Mechatronics Engineering
                 </span>{" "}
                 at KPRIET, Coimbatore. My journey started with
-                UI/UX and web development, but I've since
+                UI/UX and web development, but I&apos;ve since
                 expanded into the fascinating worlds of AI/ML,
                 Deep Learning, Robotics, and Embedded Systems.
               </p>
 
               <p className="text-lg leading-relaxed mb-6">
-                I've worked on diverse projects spanning
+                I&apos;ve worked on diverse projects spanning
                 precision agriculture, intelligent mobility, and
                 department-scale platforms. Each project has
                 taught me something new about the intersection
